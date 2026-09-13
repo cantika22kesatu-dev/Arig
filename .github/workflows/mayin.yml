@@ -1,0 +1,478 @@
+name: Hermes Agent Web App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hermes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+
+      # ==========================================================
+      # 1. INSTALL SYSTEM
+      # ==========================================================
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            curl \
+            git \
+            python3 \
+            python3-pip \
+            python3-venv \
+            openssl \
+            jq \
+            unzip
+
+      # ==========================================================
+      # 2. INSTALL HERMES
+      # ==========================================================
+
+      - name: Install Hermes Agent
+        shell: bash
+        run: |
+          set -e
+
+          curl -fsSL \
+            https://hermes-agent.nousresearch.com/install.sh \
+            | bash
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          echo
+          echo "=========================================="
+          echo "HERMES VERSION"
+          echo "=========================================="
+
+          hermes --version
+
+          echo
+          echo "Hermes location:"
+          command -v hermes
+
+      # ==========================================================
+      # 3. PREPARE HERMES
+      # ==========================================================
+
+      - name: Prepare Hermes directory
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          mkdir -p "$HOME/.hermes"
+
+          chmod 700 "$HOME/.hermes"
+
+          echo "Hermes directory:"
+          echo "$HOME/.hermes"
+
+      # ==========================================================
+      # 4. INSTALL WEB + PTY
+      # ==========================================================
+
+      - name: Install Hermes Web Dashboard extras
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          if [ -d "$HOME/.hermes/hermes-agent" ]; then
+
+            cd "$HOME/.hermes/hermes-agent"
+
+            echo "Installing Hermes web + PTY extras..."
+
+            if command -v uv >/dev/null 2>&1; then
+
+              uv pip install \
+                --system \
+                -e ".[web,pty]"
+
+            else
+
+              python3 -m pip install \
+                --break-system-packages \
+                -e ".[web,pty]"
+
+            fi
+
+          else
+
+            echo "Hermes source directory not found."
+
+            echo "Checking installed command..."
+
+            hermes --help
+
+          fi
+
+      # ==========================================================
+      # 5. CREATE DASHBOARD PASSWORD
+      # ==========================================================
+
+      - name: Configure Dashboard authentication
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          DASHBOARD_USER="admin"
+
+          DASHBOARD_PASSWORD="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)"
+
+          DASHBOARD_SECRET="$(openssl rand -base64 48)"
+
+          cat > "$HOME/.hermes/.env" <<EOF
+          HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${DASHBOARD_USER}
+          HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${DASHBOARD_PASSWORD}
+          HERMES_DASHBOARD_BASIC_AUTH_SECRET=${DASHBOARD_SECRET}
+          EOF
+
+          chmod 600 "$HOME/.hermes/.env"
+
+          echo "HERMES_DASHBOARD_USER=${DASHBOARD_USER}" >> "$GITHUB_ENV"
+          echo "HERMES_DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}" >> "$GITHUB_ENV"
+
+          echo
+          echo "=========================================="
+          echo "DASHBOARD LOGIN"
+          echo "=========================================="
+          echo
+          echo "Username:"
+          echo "${DASHBOARD_USER}"
+          echo
+          echo "Password:"
+          echo "${DASHBOARD_PASSWORD}"
+          echo
+          echo "=========================================="
+
+      # ==========================================================
+      # 6. START HERMES DASHBOARD FIRST
+      # ==========================================================
+
+      - name: Start Hermes Dashboard
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+
+          echo
+          echo "=========================================="
+          echo "STARTING HERMES DASHBOARD"
+          echo "=========================================="
+
+          nohup hermes dashboard \
+            --host 0.0.0.0 \
+            --port 9119 \
+            --no-open \
+            > "$GITHUB_WORKSPACE/logs/dashboard.log" \
+            2>&1 &
+
+          DASHBOARD_PID=$!
+
+          echo "DASHBOARD_PID=$DASHBOARD_PID" >> "$GITHUB_ENV"
+
+          echo
+          echo "Dashboard PID:"
+          echo "$DASHBOARD_PID"
+
+          echo
+          echo "Waiting for dashboard..."
+
+          READY=0
+
+          for i in {1..60}; do
+
+            if curl -sf \
+              http://127.0.0.1:9119/api/status \
+              > /tmp/dashboard-status.json \
+              2>/dev/null; then
+
+              READY=1
+              break
+
+            fi
+
+            echo "Waiting for dashboard... $i/60"
+
+            sleep 2
+
+          done
+
+          echo
+          echo "=========================================="
+          echo "DASHBOARD LOG"
+          echo "=========================================="
+
+          tail -100 \
+            "$GITHUB_WORKSPACE/logs/dashboard.log" \
+            || true
+
+          if [ "$READY" != "1" ]; then
+
+            echo
+            echo "ERROR: Dashboard gagal start."
+
+            exit 1
+
+          fi
+
+          echo
+          echo "=========================================="
+          echo "DASHBOARD ONLINE"
+          echo "=========================================="
+
+          cat /tmp/dashboard-status.json \
+            | jq . \
+            || cat /tmp/dashboard-status.json
+
+      # ==========================================================
+      # 7. CLOUDFLARE
+      # ==========================================================
+
+      - name: Install Cloudflare Tunnel
+        shell: bash
+        run: |
+          set -e
+
+          curl -L \
+            --fail \
+            --retry 3 \
+            -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+          chmod +x cloudflared
+
+          sudo mv cloudflared \
+            /usr/local/bin/cloudflared
+
+          cloudflared --version
+
+      # ==========================================================
+      # 8. START CLOUDFLARE
+      # ==========================================================
+
+      - name: Start Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+
+          echo
+          echo "=========================================="
+          echo "STARTING CLOUDFLARE"
+          echo "=========================================="
+
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:9119 \
+            --no-autoupdate \
+            > "$GITHUB_WORKSPACE/logs/cloudflare.log" \
+            2>&1 &
+
+          CF_PID=$!
+
+          echo "CF_PID=$CF_PID" >> "$GITHUB_ENV"
+
+          echo
+          echo "Cloudflare PID:"
+          echo "$CF_PID"
+
+          echo
+          echo "Waiting for public URL..."
+
+          PUBLIC_URL=""
+
+          for i in {1..60}; do
+
+            PUBLIC_URL="$(
+              grep -oE \
+              'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+              "$GITHUB_WORKSPACE/logs/cloudflare.log" \
+              | head -1 \
+              || true
+            )"
+
+            if [ -n "$PUBLIC_URL" ]; then
+              break
+            fi
+
+            sleep 2
+
+          done
+
+          if [ -z "$PUBLIC_URL" ]; then
+
+            echo
+            echo "ERROR: Cloudflare URL tidak ditemukan."
+
+            cat "$GITHUB_WORKSPACE/logs/cloudflare.log"
+
+            exit 1
+
+          fi
+
+          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
+
+          echo
+          echo
+          echo "##################################################"
+          echo "#                                                #"
+          echo "#             HERMES WEB APP ONLINE             #"
+          echo "#                                                #"
+          echo "##################################################"
+          echo
+          echo "PUBLIC URL:"
+          echo
+          echo "$PUBLIC_URL"
+          echo
+          echo "LOGIN:"
+          echo
+          echo "Username: $HERMES_DASHBOARD_USER"
+          echo "Password: $HERMES_DASHBOARD_PASSWORD"
+          echo
+          echo "##################################################"
+          echo
+
+      # ==========================================================
+      # 9. GITHUB SUMMARY
+      # ==========================================================
+
+      - name: Connection information
+        shell: bash
+        run: |
+          {
+            echo "# 🚀 Hermes Agent"
+            echo
+            echo "## Public Dashboard"
+            echo
+            echo "${PUBLIC_URL}"
+            echo
+            echo "## Login"
+            echo
+            echo "Username: \`${HERMES_DASHBOARD_USER}\`"
+            echo
+            echo "Password: \`${HERMES_DASHBOARD_PASSWORD}\`"
+            echo
+            echo "## Local Services"
+            echo
+            echo "- Dashboard: \`127.0.0.1:9119\`"
+            echo "- Cloudflare: \`ONLINE\`"
+            echo
+            echo "## Next Step"
+            echo
+            echo "1. Open the Public Dashboard URL."
+            echo "2. Login."
+            echo "3. Open Setup / API Keys / Models."
+            echo "4. Configure your provider."
+            echo "5. Use Chat."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ==========================================================
+      # 10. MONITOR
+      # ==========================================================
+
+      - name: Keep Hermes Web App alive
+        shell: bash
+        run: |
+          echo
+          echo "=========================================="
+          echo "HERMES WEB APP RUNNING"
+          echo "=========================================="
+          echo
+          echo "URL:"
+          echo "$PUBLIC_URL"
+          echo
+          echo "Username:"
+          echo "$HERMES_DASHBOARD_USER"
+          echo
+          echo "Password:"
+          echo "$HERMES_DASHBOARD_PASSWORD"
+          echo
+          echo "=========================================="
+
+          while true; do
+
+            echo
+            echo "----- $(date) -----"
+
+            if kill -0 "$DASHBOARD_PID" 2>/dev/null; then
+              echo "Hermes Dashboard : ONLINE"
+            else
+              echo "Hermes Dashboard : OFFLINE"
+              tail -100 logs/dashboard.log || true
+              exit 1
+            fi
+
+            if kill -0 "$CF_PID" 2>/dev/null; then
+              echo "Cloudflare Tunnel : ONLINE"
+            else
+              echo "Cloudflare Tunnel : OFFLINE"
+              tail -100 logs/cloudflare.log || true
+              exit 1
+            fi
+
+            if curl -sf \
+              http://127.0.0.1:9119/api/status \
+              >/dev/null 2>&1; then
+
+              echo "Dashboard HTTP : ONLINE"
+
+            else
+
+              echo "Dashboard HTTP : OFFLINE"
+
+            fi
+
+            echo
+            echo "Public URL:"
+            echo "$PUBLIC_URL"
+
+            sleep 30
+
+          done
+
+      # ==========================================================
+      # 11. LOGS
+      # ==========================================================
+
+      - name: Collect logs
+        if: always()
+        shell: bash
+        run: |
+          echo
+          echo "=========================================="
+          echo "DASHBOARD LOG"
+          echo "=========================================="
+
+          tail -200 \
+            logs/dashboard.log \
+            2>/dev/null || true
+
+          echo
+          echo "=========================================="
+          echo "CLOUDFLARE LOG"
+          echo "=========================================="
+
+          tail -200 \
+            logs/cloudflare.log \
+            2>/dev/null || true
