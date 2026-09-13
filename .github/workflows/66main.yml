@@ -1,0 +1,583 @@
+name: Hermes Agent Web
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hermes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+
+      # =========================================================
+      # SYSTEM
+      # =========================================================
+
+      - name: Install system packages
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            curl \
+            git \
+            python3 \
+            python3-pip \
+            python3-venv \
+            openssl \
+            jq \
+            wget
+
+      # =========================================================
+      # HERMES INSTALL
+      # =========================================================
+
+      - name: Install Hermes Agent
+        shell: bash
+        run: |
+          set -e
+
+          curl -fsSL \
+            https://hermes-agent.nousresearch.com/install.sh \
+            | bash
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          echo
+          echo "======================================"
+          echo "HERMES VERSION"
+          echo "======================================"
+
+          hermes --version || true
+
+          echo
+          echo "Hermes:"
+          command -v hermes
+
+      # =========================================================
+      # HERMES DIRECTORY
+      # =========================================================
+
+      - name: Prepare Hermes
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          mkdir -p "$HOME/.hermes"
+
+          echo "Hermes home:"
+          echo "$HOME/.hermes"
+
+      # =========================================================
+      # API SERVER CONFIG
+      # =========================================================
+
+      - name: Configure Hermes API server
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          API_KEY="$(openssl rand -hex 32)"
+
+          cat > "$HOME/.hermes/.env" <<EOF
+          API_SERVER_ENABLED=true
+          API_SERVER_HOST=127.0.0.1
+          API_SERVER_PORT=8642
+          API_SERVER_KEY=${API_KEY}
+          API_SERVER_MODEL_NAME=hermes-agent
+          EOF
+
+          echo "HERMES_API_KEY=${API_KEY}" >> "$GITHUB_ENV"
+
+          chmod 600 "$HOME/.hermes/.env"
+
+          echo
+          echo "Hermes API server configured."
+          echo "Port: 8642"
+          echo "Authentication: enabled"
+
+      # =========================================================
+      # INSTALL WEB EXTRAS
+      # =========================================================
+
+      - name: Install Hermes Web Dashboard dependencies
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          HERMES_DIR="$HOME/.hermes/hermes-agent"
+
+          if [ -d "$HERMES_DIR" ]; then
+
+            cd "$HERMES_DIR"
+
+            echo "Installing web + PTY extras..."
+
+            python3 -m pip install \
+              --user \
+              -e ".[web,pty]" \
+              --break-system-packages \
+              || \
+            python3 -m pip install \
+              -e ".[web,pty]" \
+              --break-system-packages
+
+          else
+
+            echo "Hermes source directory not found."
+
+            echo "Checking installation..."
+
+            hermes --help
+
+          fi
+
+      # =========================================================
+      # CONFIG CHECK
+      # =========================================================
+
+      - name: Check Hermes configuration
+        shell: bash
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+
+          echo
+          echo "======================================"
+          echo "HERMES CONFIGURATION"
+          echo "======================================"
+
+          hermes config check || true
+
+          echo
+          echo "Hermes files:"
+          find "$HOME/.hermes" \
+            -maxdepth 2 \
+            -type f \
+            | sort \
+            | head -100
+
+      # =========================================================
+      # START HERMES API/GATEWAY
+      # =========================================================
+
+      - name: Start Hermes Gateway
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+
+          echo
+          echo "======================================"
+          echo "STARTING HERMES GATEWAY"
+          echo "======================================"
+
+          nohup hermes gateway run \
+            > "$GITHUB_WORKSPACE/logs/hermes-gateway.log" \
+            2>&1 &
+
+          HERMES_PID=$!
+
+          echo "HERMES_PID=$HERMES_PID" >> "$GITHUB_ENV"
+
+          echo "PID: $HERMES_PID"
+
+          echo
+          echo "Waiting for Hermes API..."
+
+          READY=0
+
+          for i in {1..60}; do
+
+            if curl -sf \
+              http://127.0.0.1:8642/health \
+              > /tmp/hermes-health.json \
+              2>/dev/null; then
+
+              READY=1
+              break
+
+            fi
+
+            echo "Waiting for gateway... $i/60"
+
+            sleep 2
+
+          done
+
+          echo
+          echo "======================================"
+          echo "GATEWAY LOG"
+          echo "======================================"
+
+          tail -100 \
+            "$GITHUB_WORKSPACE/logs/hermes-gateway.log" \
+            || true
+
+          if [ "$READY" != "1" ]; then
+
+            echo
+            echo "Hermes API belum online."
+
+            echo
+            echo "Listening ports:"
+
+            ss -lntp || true
+
+            exit 1
+
+          fi
+
+          echo
+          echo "======================================"
+          echo "HERMES API ONLINE"
+          echo "======================================"
+
+          cat /tmp/hermes-health.json || true
+
+      # =========================================================
+      # TEST API
+      # =========================================================
+
+      - name: Test Hermes API
+        shell: bash
+        run: |
+          set -e
+
+          echo
+          echo "======================================"
+          echo "HERMES HEALTH"
+          echo "======================================"
+
+          curl -s \
+            http://127.0.0.1:8642/health \
+            | jq . || true
+
+          echo
+          echo "======================================"
+          echo "HERMES MODELS"
+          echo "======================================"
+
+          curl -s \
+            -H "Authorization: Bearer ${HERMES_API_KEY}" \
+            http://127.0.0.1:8642/v1/models \
+            | jq . || true
+
+      # =========================================================
+      # START OFFICIAL HERMES DASHBOARD
+      # =========================================================
+
+      - name: Start Hermes Web Dashboard
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+
+          echo
+          echo "======================================"
+          echo "STARTING HERMES WEB DASHBOARD"
+          echo "======================================"
+
+          nohup hermes dashboard \
+            --host 127.0.0.1 \
+            --port 9119 \
+            --no-open \
+            > "$GITHUB_WORKSPACE/logs/hermes-dashboard.log" \
+            2>&1 &
+
+          DASHBOARD_PID=$!
+
+          echo "DASHBOARD_PID=$DASHBOARD_PID" >> "$GITHUB_ENV"
+
+          echo "Dashboard PID: $DASHBOARD_PID"
+
+          echo
+          echo "Waiting for dashboard..."
+
+          READY=0
+
+          for i in {1..60}; do
+
+            if curl -sf \
+              http://127.0.0.1:9119/ \
+              > /tmp/dashboard.html \
+              2>/dev/null; then
+
+              READY=1
+              break
+
+            fi
+
+            echo "Waiting for dashboard... $i/60"
+
+            sleep 2
+
+          done
+
+          echo
+          echo "======================================"
+          echo "DASHBOARD LOG"
+          echo "======================================"
+
+          tail -100 \
+            "$GITHUB_WORKSPACE/logs/hermes-dashboard.log" \
+            || true
+
+          if [ "$READY" != "1" ]; then
+
+            echo
+            echo "ERROR: Hermes Dashboard gagal start."
+
+            exit 1
+
+          fi
+
+          echo
+          echo "======================================"
+          echo "HERMES DASHBOARD ONLINE"
+          echo "======================================"
+
+          curl -I \
+            http://127.0.0.1:9119/ \
+            || true
+
+      # =========================================================
+      # CLOUDFLARE
+      # =========================================================
+
+      - name: Install Cloudflare Tunnel
+        shell: bash
+        run: |
+          set -e
+
+          curl -L \
+            --fail \
+            --retry 3 \
+            -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+          chmod +x cloudflared
+
+          sudo mv cloudflared \
+            /usr/local/bin/cloudflared
+
+          cloudflared --version
+
+      # =========================================================
+      # CLOUDFLARE QUICK TUNNEL
+      # =========================================================
+
+      - name: Start Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$GITHUB_WORKSPACE/logs"
+
+          echo
+          echo "======================================"
+          echo "STARTING CLOUDFLARE TUNNEL"
+          echo "======================================"
+
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:9119 \
+            --no-autoupdate \
+            > "$GITHUB_WORKSPACE/logs/cloudflared.log" \
+            2>&1 &
+
+          CF_PID=$!
+
+          echo "CF_PID=$CF_PID" >> "$GITHUB_ENV"
+
+          echo "Cloudflare PID: $CF_PID"
+
+          echo
+          echo "Waiting for public URL..."
+
+          PUBLIC_URL=""
+
+          for i in {1..60}; do
+
+            PUBLIC_URL="$(
+              grep -oE \
+              'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+              "$GITHUB_WORKSPACE/logs/cloudflared.log" \
+              | head -1 \
+              || true
+            )"
+
+            if [ -n "$PUBLIC_URL" ]; then
+              break
+            fi
+
+            sleep 2
+
+          done
+
+          if [ -z "$PUBLIC_URL" ]; then
+
+            echo
+            echo "Cloudflare URL gagal ditemukan."
+
+            cat "$GITHUB_WORKSPACE/logs/cloudflared.log"
+
+            exit 1
+
+          fi
+
+          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
+
+          echo
+          echo
+          echo "##################################################"
+          echo "#                                                #"
+          echo "#          HERMES WEB APP IS ONLINE             #"
+          echo "#                                                #"
+          echo "##################################################"
+          echo
+          echo "PUBLIC URL:"
+          echo
+          echo "$PUBLIC_URL"
+          echo
+          echo "Dashboard:"
+          echo "$PUBLIC_URL"
+          echo
+          echo "Gateway:"
+          echo "ONLINE"
+          echo
+          echo "API:"
+          echo "127.0.0.1:8642"
+          echo
+          echo "##################################################"
+          echo
+
+      # =========================================================
+      # SAVE PUBLIC URL TO SUMMARY
+      # =========================================================
+
+      - name: Show connection information
+        shell: bash
+        run: |
+          {
+            echo "# 🚀 Hermes Agent"
+            echo
+            echo "## Public Web Dashboard"
+            echo
+            echo "**${PUBLIC_URL}**"
+            echo
+            echo "### Services"
+            echo
+            echo "- Hermes Gateway: `ONLINE`"
+            echo "- Hermes API: `127.0.0.1:8642`"
+            echo "- Hermes Dashboard: `127.0.0.1:9119`"
+            echo "- Cloudflare Tunnel: `ONLINE`"
+            echo
+            echo "### Configuration"
+            echo
+            echo "Hermes stores persistent configuration under:"
+            echo
+            echo "\`~/.hermes/\`"
+            echo
+            echo "Use the Web Dashboard Setup/Settings to configure your provider, model and other settings."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # =========================================================
+      # MONITOR
+      # =========================================================
+
+      - name: Keep Hermes running
+        shell: bash
+        run: |
+          echo
+          echo "=============================================="
+          echo "HERMES IS RUNNING"
+          echo "=============================================="
+          echo
+          echo "Public URL:"
+          echo "${PUBLIC_URL}"
+          echo
+
+          while true; do
+
+            echo
+            echo "----- STATUS $(date) -----"
+
+            if kill -0 "${HERMES_PID}" 2>/dev/null; then
+              echo "Hermes Gateway : ONLINE"
+            else
+              echo "Hermes Gateway : OFFLINE"
+              exit 1
+            fi
+
+            if kill -0 "${DASHBOARD_PID}" 2>/dev/null; then
+              echo "Hermes Dashboard : ONLINE"
+            else
+              echo "Hermes Dashboard : OFFLINE"
+              exit 1
+            fi
+
+            if kill -0 "${CF_PID}" 2>/dev/null; then
+              echo "Cloudflare : ONLINE"
+            else
+              echo "Cloudflare : OFFLINE"
+              exit 1
+            fi
+
+            echo
+            echo "Public URL:"
+            echo "${PUBLIC_URL}"
+
+            sleep 30
+
+          done
+
+      # =========================================================
+      # LOGS IF FAILURE
+      # =========================================================
+
+      - name: Collect logs
+        if: always()
+        shell: bash
+        run: |
+          echo
+          echo "======================================"
+          echo "HERMES GATEWAY LOG"
+          echo "======================================"
+
+          tail -200 \
+            logs/hermes-gateway.log \
+            2>/dev/null || true
+
+          echo
+          echo "======================================"
+          echo "HERMES DASHBOARD LOG"
+          echo "======================================"
+
+          tail -200 \
+            logs/hermes-dashboard.log \
+            2>/dev/null || true
+
+          echo
+          echo "======================================"
+          echo "CLOUDFLARE LOG"
+          echo "======================================"
+
+          tail -200 \
+            logs/cloudflared.log \
+            2>/dev/null || true
