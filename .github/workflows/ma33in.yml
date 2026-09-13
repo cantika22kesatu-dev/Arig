@@ -1,0 +1,458 @@
+name: Hermes Agent Web App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hermes:
+    runs-on: ubuntu-latest
+
+    # GitHub-hosted runner bukan VPS permanen.
+    # Maksimal waktu job tergantung batas runner/account.
+    timeout-minutes: 350
+
+    env:
+      # =========================================================
+      # AI ENDPOINT
+      # =========================================================
+
+      AI_ENDPOINT: "https://api.b.ai/v1"
+      AI_MODEL: "deepseek-v4.1-flash"
+
+      # =========================================================
+      # API KEY
+      #
+      # Ganti dengan API key BARU Anda.
+      # Jangan gunakan key yang sebelumnya sudah dikirim di chat.
+      # =========================================================
+
+      AI_API_KEY: "sk-1vpbupu1witaf0xshuq4yjau63dlboqb"
+
+      # =========================================================
+      # HERMES
+      # =========================================================
+
+      HERMES_HOME: "/home/runner/.hermes"
+      HERMES_PORT: "9119"
+
+      # =========================================================
+      # WEB LOGIN
+      #
+      # Setelah URL Cloudflare dibuka:
+      #
+      # Username: admin
+      # Password: nilai HERMES_WEB_PASSWORD
+      #
+      # Ganti password ini sebelum digunakan.
+      # =========================================================
+
+      HERMES_WEB_USERNAME: "admin"
+      HERMES_WEB_PASSWORD: "Sandi123"
+
+    steps:
+
+      # =========================================================
+      # 1. CHECKOUT
+      # =========================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ===========================================
+      # 2. SYSTEM DEPENDENCIES
+      # =========================================================
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            curl \
+            git \
+            jq \
+            ripgrep \
+            build-essential \
+            python3 \
+            python3-venv \
+            python3-pip
+
+      # =========================================================
+      # 3. INSTALL UV
+      # =========================================================
+
+      - name: Install uv
+        shell: bash
+        run: |
+          set -e
+
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          uv --version
+
+      # =========================================================
+      # 4. INSTALL HERMES AGENT
+      # =========================================================
+
+      - name: Install Hermes Agent
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          curl -fsSL \
+            https://hermes-agent.nousresearch.com/install.sh \
+            | bash
+
+          echo ""
+          echo "Hermes installation:"
+          ls -la "$HERMES_HOME" || true
+
+      # =========================================================
+      # 5. INSTALL WEB + PTY
+      # =========================================================
+
+      - name: Install Hermes Web and PTY
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          cd "$HERMES_HOME/hermes-agent"
+
+          ./venv/bin/python -m pip install \
+            -e ".[web,pty]"
+
+      # =========================================================
+      # 6. CREATE HERMES CONFIG
+      # =========================================================
+
+      - name: Configure Hermes
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$HERMES_HOME"
+
+          cat > "$HERMES_HOME/config.yaml" <<EOF
+          model:
+            provider: custom
+            default: "${AI_MODEL}"
+            base_url: "${AI_ENDPOINT}"
+            api_key: "${AI_API_KEY}"
+
+          terminal:
+            backend: local
+            cwd: "${GITHUB_WORKSPACE}"
+          EOF
+
+          chmod 600 "$HERMES_HOME/config.yaml"
+
+          echo ""
+          echo "=============================================="
+          echo " Hermes configuration"
+          echo "=============================================="
+          echo "Provider : custom"
+          echo "Endpoint : ${AI_ENDPOINT}"
+          echo "Model    : ${AI_MODEL}"
+          echo "API key  : ********"
+          echo "=============================================="
+
+      # =========================================================
+      # 7. CREATE DASHBOARD AUTH
+      # =========================================================
+
+      - name: Configure Hermes Web Login
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$HERMES_HOME"
+
+          AUTH_SECRET="$(openssl rand -base64 32)"
+
+          cat > "$HERMES_HOME/.env" <<EOF
+          HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_WEB_USERNAME}
+          HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_WEB_PASSWORD}
+          HERMES_DASHBOARD_BASIC_AUTH_SECRET=${AUTH_SECRET}
+          EOF
+
+          chmod 600 "$HERMES_HOME/.env"
+
+          echo ""
+          echo "Hermes Web authentication configured."
+          echo "Username: ${HERMES_WEB_USERNAME}"
+          echo "Password: ********"
+
+      # =========================================================
+      # 8. VERIFY HERMES
+      # =========================================================
+
+      - name: Verify Hermes
+        shell: bash
+        run: |
+          set +e
+
+          cd "$HERMES_HOME/hermes-agent"
+
+          echo ""
+          echo "Hermes version:"
+          ./venv/bin/hermes --version
+
+          echo ""
+          echo "Hermes doctor:"
+          ./venv/bin/hermes doctor || true
+
+      # =========================================================
+      # 9. START HERMES DASHBOARD
+      # =========================================================
+
+      - name: Start Hermes Web App
+        shell: bash
+        run: |
+          set -e
+
+          cd "$HERMES_HOME/hermes-agent"
+
+          mkdir -p /tmp/hermes
+
+          # Load dashboard credentials.
+          set -a
+          source "$HERMES_HOME/.env"
+          set +a
+
+          nohup ./venv/bin/hermes dashboard \
+            --host 0.0.0.0 \
+            --port "$HERMES_PORT" \
+            --no-open \
+            > /tmp/hermes/dashboard.log 2>&1 &
+
+          echo $! > /tmp/hermes/dashboard.pid
+
+          echo ""
+          echo "Hermes dashboard PID:"
+          cat /tmp/hermes/dashboard.pid
+
+          echo ""
+          echo "Waiting for Hermes..."
+
+          READY="false"
+
+          for i in $(seq 1 60); do
+
+            if curl \
+              -s \
+              --max-time 3 \
+              "http://127.0.0.1:${HERMES_PORT}/api/status" \
+              > /tmp/hermes/status.json 2>/dev/null; then
+
+              READY="true"
+              break
+
+            fi
+
+            sleep 2
+
+          done
+
+          echo ""
+
+          if [ "$READY" != "true" ]; then
+            echo "Hermes failed to start."
+            echo ""
+            echo "========== DASHBOARD LOG =========="
+            cat /tmp/hermes/dashboard.log || true
+            echo "==================================="
+            exit 1
+          fi
+
+          echo "Hermes dashboard is READY."
+
+          echo ""
+          echo "Status:"
+          cat /tmp/hermes/status.json || true
+
+      # =========================================================
+      # 10. INSTALL CLOUDFLARED
+      # =========================================================
+
+      - name: Install Cloudflare Tunnel
+        shell: bash
+        run: |
+          set -e
+
+          curl \
+            -L \
+            --fail \
+            --retry 5 \
+            -o /tmp/cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+
+          sudo dpkg -i /tmp/cloudflared.deb
+
+          cloudflared --version
+
+      # =========================================================
+      # 11. START CLOUDFLARE QUICK TUNNEL
+      # =========================================================
+
+      - name: Start Cloudflare Public URL
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p /tmp/cloudflared
+
+          nohup cloudflared tunnel \
+            --url "http://127.0.0.1:${HERMES_PORT}" \
+            --no-autoupdate \
+            > /tmp/cloudflared/tunnel.log 2>&1 &
+
+          echo $! > /tmp/cloudflared/tunnel.pid
+
+          echo ""
+          echo "Waiting for Cloudflare URL..."
+
+          PUBLIC_URL=""
+
+          for i in $(seq 1 60); do
+
+            PUBLIC_URL="$(
+              grep -oE \
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              /tmp/cloudflared/tunnel.log \
+              | head -n 1 \
+              || true
+            )"
+
+            if [ -n "$PUBLIC_URL" ]; then
+              break
+            fi
+
+            sleep 2
+
+          done
+
+          if [ -z "$PUBLIC_URL" ]; then
+
+            echo ""
+            echo "Cloudflare tunnel failed."
+            echo ""
+            cat /tmp/cloudflared/tunnel.log || true
+
+            exit 1
+
+          fi
+
+          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "======================================================"
+          echo "             HERMES AGENT WEB APP"
+          echo "======================================================"
+          echo ""
+          echo "🌐 PUBLIC URL:"
+          echo "$PUBLIC_URL"
+          echo ""
+          echo "🤖 MODEL:"
+          echo "$AI_MODEL"
+          echo ""
+          echo "🔌 ENDPOINT:"
+          echo "$AI_ENDPOINT"
+          echo ""
+          echo "🔐 WEB USER:"
+          echo "$HERMES_WEB_USERNAME"
+          echo ""
+          echo "🔐 WEB PASSWORD:"
+          echo "$HERMES_WEB_PASSWORD"
+          echo ""
+          echo "======================================================"
+
+      # =========================================================
+      # 12. CHECK PUBLIC WEB APP
+      # =========================================================
+
+      - name: Check Hermes Web App
+        shell: bash
+        run: |
+          echo ""
+          echo "Checking local Hermes server..."
+
+          curl \
+            -I \
+            --max-time 10 \
+            "http://127.0.0.1:${HERMES_PORT}" \
+            || true
+
+          echo ""
+          echo "Cloudflare tunnel log:"
+          tail -n 20 /tmp/cloudflared/tunnel.log || true
+
+      # =========================================================
+      # 13. KEEP ACTION ALIVE
+      # =========================================================
+
+      - name: Keep Hermes Online
+        shell: bash
+        run: |
+          set -e
+
+          echo ""
+          echo "======================================================"
+          echo " Hermes Agent is ONLINE"
+          echo "======================================================"
+          echo ""
+          echo "🌐 Open:"
+          echo "$PUBLIC_URL"
+          echo ""
+          echo "Then login with:"
+          echo "Username: $HERMES_WEB_USERNAME"
+          echo "Password: $HERMES_WEB_PASSWORD"
+          echo ""
+          echo "Model:"
+          echo "$AI_MODEL"
+          echo ""
+          echo "======================================================"
+
+          while true; do
+
+            if ! kill -0 \
+              "$(cat /tmp/hermes/dashboard.pid)" \
+              2>/dev/null; then
+
+              echo "ERROR: Hermes dashboard stopped."
+
+              cat /tmp/hermes/dashboard.log || true
+
+              exit 1
+
+            fi
+
+            if ! kill -0 \
+              "$(cat /tmp/cloudflared/tunnel.pid)" \
+              2>/dev/null; then
+
+              echo "ERROR: Cloudflare tunnel stopped."
+
+              cat /tmp/cloudflared/tunnel.log || true
+
+              exit 1
+
+            fi
+
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Hermes ONLINE"
+
+            sleep 30
+
+          done
