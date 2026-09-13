@@ -1,0 +1,2613 @@
+name: AI Agent ChatGPT + Cloudflare2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ai-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+
+      # =========================================================
+      # INSTALL
+      # =========================================================
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 curl
+
+          curl -L --fail \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o cloudflared
+
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/cloudflared
+
+          python3 --version
+          cloudflared --version
+
+
+      # =========================================================
+      # CREATE WEB APP
+      # =========================================================
+
+      - name: Create AI Agent Web App
+        run: |
+
+          mkdir -p app
+          cd app
+
+          cat > server.py <<'PY'
+
+          import json
+          import os
+          import urllib.request
+          import urllib.error
+
+          from http.server import (
+              BaseHTTPRequestHandler,
+              ThreadingHTTPServer
+          )
+
+
+          PORT = int(
+              os.environ.get(
+                  "PORT",
+                  "8080"
+              )
+          )
+
+          CONFIG_FILE = "config.json"
+
+
+          # =====================================================
+          # HTML
+          # =====================================================
+
+          HTML = r'''
+          <!DOCTYPE html>
+
+          <html lang="id">
+
+          <head>
+
+          <meta charset="UTF-8">
+
+          <meta
+            name="viewport"
+            content="width=device-width,initial-scale=1"
+          >
+
+          <title>AI Agent</title>
+
+
+          <style>
+
+          * {
+            box-sizing: border-box;
+          }
+
+
+          body {
+
+            margin: 0;
+
+            background: #212121;
+
+            color: #ececec;
+
+            font-family:
+              Inter,
+              ui-sans-serif,
+              system-ui,
+              -apple-system,
+              BlinkMacSystemFont,
+              "Segoe UI",
+              sans-serif;
+
+          }
+
+
+          .app {
+
+            height: 100vh;
+
+            display: flex;
+
+          }
+
+
+          /* SIDEBAR */
+
+          .sidebar {
+
+            width: 260px;
+
+            background: #171717;
+
+            border-right:
+              1px solid #303030;
+
+            padding: 12px;
+
+            display: flex;
+
+            flex-direction: column;
+
+          }
+
+
+          .brand {
+
+            padding: 14px;
+
+            font-size: 19px;
+
+            font-weight: 700;
+
+          }
+
+
+          button {
+
+            font-family: inherit;
+
+          }
+
+
+          .side-button {
+
+            width: 100%;
+
+            border:
+              1px solid #424242;
+
+            background: transparent;
+
+            color: white;
+
+            border-radius: 8px;
+
+            padding: 11px;
+
+            text-align: left;
+
+            cursor: pointer;
+
+            margin-bottom: 8px;
+
+          }
+
+
+          .side-button:hover {
+
+            background: #2a2a2a;
+
+          }
+
+
+          .side-bottom {
+
+            margin-top: auto;
+
+          }
+
+
+          /* MAIN */
+
+          .main {
+
+            flex: 1;
+
+            min-width: 0;
+
+            display: flex;
+
+            flex-direction: column;
+
+          }
+
+
+          .topbar {
+
+            height: 58px;
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: space-between;
+
+            padding:
+              0 20px;
+
+            border-bottom:
+              1px solid #303030;
+
+          }
+
+
+          .model {
+
+            font-weight: 600;
+
+          }
+
+
+          .api-status {
+
+            display: flex;
+
+            align-items: center;
+
+            gap: 7px;
+
+            font-size: 13px;
+
+          }
+
+
+          .dot {
+
+            width: 9px;
+
+            height: 9px;
+
+            border-radius: 50%;
+
+            background: #777;
+
+          }
+
+
+          .dot.ok {
+
+            background: #22c55e;
+
+          }
+
+
+          .dot.error {
+
+            background: #ef4444;
+
+          }
+
+
+          .dot.testing {
+
+            background: #eab308;
+
+          }
+
+
+          /* CHAT */
+
+          .messages {
+
+            flex: 1;
+
+            overflow-y: auto;
+
+            padding:
+              30px 18px 150px;
+
+          }
+
+
+          .message {
+
+            max-width: 850px;
+
+            margin:
+              0 auto 28px;
+
+            display: flex;
+
+            gap: 14px;
+
+          }
+
+
+          .avatar {
+
+            width: 34px;
+
+            height: 34px;
+
+            border-radius: 7px;
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: center;
+
+            flex: 0 0 34px;
+
+            background: #10a37f;
+
+            font-weight: 700;
+
+          }
+
+
+          .user .avatar {
+
+            background: #565869;
+
+          }
+
+
+          .content {
+
+            flex: 1;
+
+            line-height: 1.65;
+
+            white-space: pre-wrap;
+
+            overflow-wrap: anywhere;
+
+          }
+
+
+          .welcome {
+
+            max-width: 850px;
+
+            margin:
+              12vh auto 0;
+
+            text-align: center;
+
+          }
+
+
+          .welcome h1 {
+
+            font-size: 32px;
+
+          }
+
+
+          .hint {
+
+            color: #aaa;
+
+            font-size: 13px;
+
+            line-height: 1.5;
+
+          }
+
+
+          /* COMPOSER */
+
+          .composer-wrap {
+
+            position: fixed;
+
+            left: 260px;
+
+            right: 0;
+
+            bottom: 0;
+
+            padding: 18px;
+
+            background:
+              linear-gradient(
+                transparent,
+                #212121 35%
+              );
+
+          }
+
+
+          .composer {
+
+            max-width: 850px;
+
+            margin: auto;
+
+            display: flex;
+
+            gap: 8px;
+
+            padding: 8px;
+
+            background: #2f2f2f;
+
+            border:
+              1px solid #555;
+
+            border-radius: 14px;
+
+          }
+
+
+          textarea {
+
+            flex: 1;
+
+            resize: none;
+
+            min-height: 46px;
+
+            max-height: 180px;
+
+            border: 0;
+
+            outline: 0;
+
+            background: transparent;
+
+            color: white;
+
+            padding: 12px;
+
+            font: inherit;
+
+          }
+
+
+          .send {
+
+            width: 44px;
+
+            height: 44px;
+
+            border: 0;
+
+            border-radius: 9px;
+
+            background: white;
+
+            color: #111;
+
+            cursor: pointer;
+
+            font-size: 18px;
+
+          }
+
+
+          .send:disabled {
+
+            opacity: .4;
+
+            cursor: not-allowed;
+
+          }
+
+
+          /* SETUP */
+
+          .setup {
+
+            position: fixed;
+
+            inset: 0;
+
+            background:
+              rgba(0,0,0,.72);
+
+            display: none;
+
+            align-items: center;
+
+            justify-content: center;
+
+            padding: 20px;
+
+            z-index: 50;
+
+          }
+
+
+          .setup-card {
+
+            width:
+              min(650px,100%);
+
+            max-height: 95vh;
+
+            overflow-y: auto;
+
+            background: #242424;
+
+            border:
+              1px solid #444;
+
+            border-radius: 16px;
+
+            padding: 28px;
+
+          }
+
+
+          .setup-title {
+
+            font-size: 23px;
+
+            font-weight: 700;
+
+            margin-bottom: 6px;
+
+          }
+
+
+          label {
+
+            display: block;
+
+            margin:
+              16px 0 7px;
+
+            font-size: 14px;
+
+          }
+
+
+          input {
+
+            width: 100%;
+
+            padding: 12px;
+
+            border-radius: 8px;
+
+            border:
+              1px solid #555;
+
+            background: #171717;
+
+            color: white;
+
+            outline: none;
+
+          }
+
+
+          input:focus {
+
+            border-color:
+              #10a37f;
+
+          }
+
+
+          .buttons {
+
+            display: flex;
+
+            gap: 9px;
+
+            margin-top: 22px;
+
+          }
+
+
+          .action {
+
+            flex: 1;
+
+            padding: 12px;
+
+            border: 0;
+
+            border-radius: 8px;
+
+            cursor: pointer;
+
+            font-weight: 700;
+
+          }
+
+
+          .test {
+
+            background: #3b82f6;
+
+            color: white;
+
+          }
+
+
+          .save {
+
+            background: #10a37f;
+
+            color: white;
+
+          }
+
+
+          .result {
+
+            margin-top: 16px;
+
+            padding: 12px;
+
+            border-radius: 8px;
+
+            background: #171717;
+
+            display: none;
+
+            line-height: 1.5;
+
+            font-size: 14px;
+
+          }
+
+
+          .result.ok {
+
+            display: block;
+
+            border:
+              1px solid #166534;
+
+          }
+
+
+          .result.error {
+
+            display: block;
+
+            border:
+              1px solid #991b1b;
+
+          }
+
+
+          .result.testing {
+
+            display: block;
+
+            border:
+              1px solid #854d0e;
+
+          }
+
+
+          @media(max-width:700px) {
+
+            .sidebar {
+
+              display: none;
+
+            }
+
+            .composer-wrap {
+
+              left: 0;
+
+            }
+
+            .messages {
+
+              padding-left: 12px;
+
+              padding-right: 12px;
+
+            }
+
+          }
+
+          </style>
+
+          </head>
+
+
+          <body>
+
+
+          <div class="app">
+
+
+            <aside class="sidebar">
+
+              <div class="brand">
+
+                🤖 AI Agent
+
+              </div>
+
+
+              <button
+                class="side-button"
+                onclick="newChat()"
+              >
+
+                ＋ New chat
+
+              </button>
+
+
+              <div class="side-bottom">
+
+                <button
+                  class="side-button"
+                  onclick="openSetup()"
+                >
+
+                  ⚙️ Settings
+
+                </button>
+
+              </div>
+
+            </aside>
+
+
+            <main class="main">
+
+
+              <header class="topbar">
+
+                <div
+                  class="model"
+                  id="modelName"
+                >
+
+                  AI Agent
+
+                </div>
+
+
+                <div
+                  class="api-status"
+                  id="apiStatus"
+                >
+
+                  <span
+                    class="dot"
+                    id="statusDot"
+                  ></span>
+
+                  <span id="statusText">
+                    Not configured
+                  </span>
+
+                </div>
+
+              </header>
+
+
+              <section
+                class="messages"
+                id="messages"
+              >
+
+                <div
+                  class="welcome"
+                  id="welcome"
+                >
+
+                  <h1>
+                    How can I help you?
+                  </h1>
+
+                  <p class="hint">
+                    Configure your AI API melalui
+                    Settings untuk mulai chat.
+                  </p>
+
+                </div>
+
+              </section>
+
+
+              <div class="composer-wrap">
+
+                <div class="composer">
+
+                  <textarea
+                    id="input"
+                    placeholder="Message AI Agent..."
+                    rows="1"
+                    onkeydown="handleKey(event)"
+                  ></textarea>
+
+
+                  <button
+                    class="send"
+                    id="send"
+                    onclick="sendMessage()"
+                  >
+
+                    ↑
+
+                  </button>
+
+                </div>
+
+              </div>
+
+
+            </main>
+
+          </div>
+
+
+          <!-- SETUP MODAL -->
+
+          <div
+            class="setup"
+            id="setup"
+          >
+
+            <div class="setup-card">
+
+
+              <div class="setup-title">
+
+                ⚙️ AI Agent Setup
+
+              </div>
+
+
+              <p class="hint">
+
+                Masukkan konfigurasi API AI kamu,
+                kemudian gunakan Test Connection
+                atau Test AI.
+
+              </p>
+
+
+              <label>
+                API Endpoint
+              </label>
+
+              <input
+                id="endpoint"
+                placeholder="https://api.example.com/v1/chat/completions"
+              >
+
+
+              <label>
+                API Key
+              </label>
+
+              <input
+                id="apikey"
+                type="password"
+                placeholder="sk-..."
+              >
+
+
+              <label>
+                Model
+              </label>
+
+              <input
+                id="model"
+                placeholder="deepseek-chat"
+              >
+
+
+              <label>
+                System Prompt
+              </label>
+
+              <input
+                id="system"
+                placeholder="You are a helpful AI assistant."
+              >
+
+
+              <div class="buttons">
+
+                <button
+                  class="action test"
+                  onclick="testConnection()"
+                >
+
+                  🔌 Test Connection
+
+                </button>
+
+
+                <button
+                  class="action test"
+                  onclick="testAI()"
+                >
+
+                  🧪 Test AI
+
+                </button>
+
+              </div>
+
+
+              <div
+                class="result"
+                id="testResult"
+              ></div>
+
+
+              <button
+                class="action save"
+                onclick="saveSetup()"
+              >
+
+                💾 Save & Continue
+
+              </button>
+
+
+            </div>
+
+          </div>
+
+
+          <script>
+
+
+          let history = [];
+
+          let aiReady = false;
+
+
+          // ====================================================
+          // STATUS
+          // ====================================================
+
+          function setStatus(
+            type,
+            text
+          ) {
+
+            const dot =
+              document.getElementById(
+                "statusDot"
+              );
+
+            const label =
+              document.getElementById(
+                "statusText"
+              );
+
+            dot.className =
+              "dot " + type;
+
+            label.textContent =
+              text;
+
+          }
+
+
+          function result(
+            type,
+            text
+          ) {
+
+            const box =
+              document.getElementById(
+                "testResult"
+              );
+
+            box.className =
+              "result " + type;
+
+            box.textContent =
+              text;
+
+          }
+
+
+          // ====================================================
+          // LOAD CONFIG
+          // ====================================================
+
+          async function loadConfig() {
+
+            try {
+
+              const response =
+                await fetch(
+                  "/api/config"
+                );
+
+              const config =
+                await response.json();
+
+
+              document.getElementById(
+                "endpoint"
+              ).value =
+                config.endpoint || "";
+
+
+              document.getElementById(
+                "apikey"
+              ).value =
+                config.apikey || "";
+
+
+              document.getElementById(
+                "model"
+              ).value =
+                config.model || "";
+
+
+              document.getElementById(
+                "system"
+              ).value =
+                config.system || "";
+
+
+              if (
+                config.endpoint &&
+                config.model
+              ) {
+
+                document.getElementById(
+                  "modelName"
+                ).textContent =
+                  config.model;
+
+                setStatus(
+                  "",
+                  "Configured"
+                );
+
+              } else {
+
+                openSetup();
+
+              }
+
+            } catch (error) {
+
+              setStatus(
+                "error",
+                "Server error"
+              );
+
+            }
+
+          }
+
+
+          // ====================================================
+          // OPEN SETUP
+          // ====================================================
+
+          function openSetup() {
+
+            document.getElementById(
+              "setup"
+            ).style.display =
+              "flex";
+
+          }
+
+
+          function closeSetup() {
+
+            document.getElementById(
+              "setup"
+            ).style.display =
+              "none";
+
+          }
+
+
+          // ====================================================
+          // GET FORM
+          // ====================================================
+
+          function getForm() {
+
+            return {
+
+              endpoint:
+                document.getElementById(
+                  "endpoint"
+                ).value.trim(),
+
+              apikey:
+                document.getElementById(
+                  "apikey"
+                ).value.trim(),
+
+              model:
+                document.getElementById(
+                  "model"
+                ).value.trim(),
+
+              system:
+                document.getElementById(
+                  "system"
+                ).value.trim()
+
+            };
+
+          }
+
+
+          // ====================================================
+          // TEST CONNECTION
+          // ====================================================
+
+          async function testConnection() {
+
+            const config =
+              getForm();
+
+
+            if (
+              !config.endpoint
+            ) {
+
+              result(
+                "error",
+                "❌ API Endpoint belum diisi."
+              );
+
+              return;
+
+            }
+
+
+            result(
+              "testing",
+              "⏳ Menguji koneksi ke endpoint..."
+            );
+
+
+            setStatus(
+              "testing",
+              "Testing..."
+            );
+
+
+            try {
+
+              const response =
+                await fetch(
+                  "/api/test-connection",
+                  {
+
+                    method: "POST",
+
+                    headers: {
+                      "Content-Type":
+                        "application/json"
+                    },
+
+                    body:
+                      JSON.stringify(
+                        config
+                      )
+
+                  }
+                );
+
+
+              const data =
+                await response.json();
+
+
+              if (
+                data.ok
+              ) {
+
+                result(
+                  "ok",
+                  "✅ Connection berhasil.\nHTTP " +
+                  data.status
+                );
+
+                setStatus(
+                  "ok",
+                  "Connection OK"
+                );
+
+              } else {
+
+                throw new Error(
+                  data.error ||
+                  "Connection failed"
+                );
+
+              }
+
+            } catch (error) {
+
+              result(
+                "error",
+                "❌ Connection gagal:\n" +
+                error.message
+              );
+
+              setStatus(
+                "error",
+                "Connection Error"
+              );
+
+            }
+
+          }
+
+
+          // ====================================================
+          // TEST AI
+          // ====================================================
+
+          async function testAI() {
+
+            const config =
+              getForm();
+
+
+            if (
+              !config.endpoint ||
+              !config.model
+            ) {
+
+              result(
+                "error",
+                "❌ Endpoint dan Model wajib diisi."
+              );
+
+              return;
+
+            }
+
+
+            result(
+              "testing",
+              "⏳ Mengirim pesan test ke AI..."
+            );
+
+
+            setStatus(
+              "testing",
+              "Testing AI..."
+            );
+
+
+            try {
+
+              const response =
+                await fetch(
+                  "/api/test-ai",
+                  {
+
+                    method: "POST",
+
+                    headers: {
+                      "Content-Type":
+                        "application/json"
+                    },
+
+                    body:
+                      JSON.stringify(
+                        config
+                      )
+
+                  }
+                );
+
+
+              const data =
+                await response.json();
+
+
+              if (
+                data.ok
+              ) {
+
+                aiReady = true;
+
+
+                result(
+                  "ok",
+                  "✅ AI BERFUNGSI!\n\n" +
+                  "Model: " +
+                  config.model +
+                  "\n\n" +
+                  "Response:\n" +
+                  data.content
+                );
+
+
+                setStatus(
+                  "ok",
+                  "AI Online"
+                );
+
+              } else {
+
+                throw new Error(
+                  data.error ||
+                  "AI test failed"
+                );
+
+              }
+
+            } catch (error) {
+
+              aiReady = false;
+
+
+              result(
+                "error",
+                "❌ AI TIDAK BERFUNGSI:\n\n" +
+                error.message
+              );
+
+
+              setStatus(
+                "error",
+                "AI Error"
+              );
+
+            }
+
+          }
+
+
+          // ====================================================
+          // SAVE
+          // ====================================================
+
+          async function saveSetup() {
+
+            const config =
+              getForm();
+
+
+            if (
+              !config.endpoint ||
+              !config.model
+            ) {
+
+              alert(
+                "Endpoint dan Model wajib diisi."
+              );
+
+              return;
+
+            }
+
+
+            try {
+
+              const response =
+                await fetch(
+                  "/api/config",
+                  {
+
+                    method: "POST",
+
+                    headers: {
+                      "Content-Type":
+                        "application/json"
+                    },
+
+                    body:
+                      JSON.stringify(
+                        config
+                      )
+
+                  }
+                );
+
+
+              if (
+                !response.ok
+              ) {
+
+                throw new Error(
+                  "Gagal menyimpan konfigurasi"
+                );
+
+              }
+
+
+              document.getElementById(
+                "modelName"
+              ).textContent =
+                config.model;
+
+
+              setStatus(
+                "",
+                "Configured"
+              );
+
+
+              closeSetup();
+
+
+            } catch (error) {
+
+              alert(
+                error.message
+              );
+
+            }
+
+          }
+
+
+          // ====================================================
+          // NEW CHAT
+          // ====================================================
+
+          function newChat() {
+
+            history = [];
+
+
+            document.getElementById(
+              "messages"
+            ).innerHTML = `
+
+              <div
+                class="welcome"
+                id="welcome"
+              >
+
+                <h1>
+                  How can I help you?
+                </h1>
+
+                <p class="hint">
+                  Percakapan baru dimulai.
+                </p>
+
+              </div>
+
+            `;
+
+          }
+
+
+          // ====================================================
+          // ADD MESSAGE
+          // ====================================================
+
+          function addMessage(
+            role,
+            text
+          ) {
+
+            const welcome =
+              document.getElementById(
+                "welcome"
+              );
+
+
+            if (welcome)
+              welcome.remove();
+
+
+            const box =
+              document.createElement(
+                "div"
+              );
+
+
+            box.className =
+              "message " + role;
+
+
+            box.innerHTML = `
+
+              <div class="avatar">
+                ${
+                  role === "user"
+                  ? "U"
+                  : "AI"
+                }
+              </div>
+
+              <div class="content"></div>
+
+            `;
+
+
+            box.querySelector(
+              ".content"
+            ).textContent =
+              text;
+
+
+            document.getElementById(
+              "messages"
+            ).appendChild(
+              box
+            );
+
+
+            box.scrollIntoView({
+              behavior: "smooth",
+              block: "end"
+            });
+
+
+            return box.querySelector(
+              ".content"
+            );
+
+          }
+
+
+          // ====================================================
+          // SEND MESSAGE
+          // ====================================================
+
+          async function sendMessage() {
+
+            const input =
+              document.getElementById(
+                "input"
+              );
+
+
+            const text =
+              input.value.trim();
+
+
+            if (!text)
+              return;
+
+
+            input.value = "";
+
+
+            addMessage(
+              "user",
+              text
+            );
+
+
+            history.push({
+
+              role: "user",
+
+              content: text
+
+            });
+
+
+            const aiBox =
+              addMessage(
+                "assistant",
+                "Thinking..."
+              );
+
+
+            document.getElementById(
+              "send"
+            ).disabled = true;
+
+
+            setStatus(
+              "testing",
+              "Thinking..."
+            );
+
+
+            try {
+
+              const response =
+                await fetch(
+                  "/api/chat",
+                  {
+
+                    method: "POST",
+
+                    headers: {
+                      "Content-Type":
+                        "application/json"
+                    },
+
+                    body:
+                      JSON.stringify({
+                        messages:
+                          history
+                      })
+
+                  }
+                );
+
+
+              const data =
+                await response.json();
+
+
+              if (
+                !response.ok
+              ) {
+
+                throw new Error(
+                  data.error ||
+                  "AI API error"
+                );
+
+              }
+
+
+              const answer =
+                data.content ||
+                "Tidak ada response.";
+
+
+              aiBox.textContent =
+                answer;
+
+
+              history.push({
+
+                role:
+                  "assistant",
+
+                content:
+                  answer
+
+              });
+
+
+              setStatus(
+                "ok",
+                "AI Online"
+              );
+
+
+            } catch (error) {
+
+              aiBox.textContent =
+                "❌ Error: " +
+                error.message;
+
+
+              setStatus(
+                "error",
+                "AI Error"
+              );
+
+            }
+
+
+            document.getElementById(
+              "send"
+            ).disabled = false;
+
+          }
+
+
+          // ====================================================
+          // ENTER
+          // ====================================================
+
+          function handleKey(e) {
+
+            if (
+              e.key === "Enter" &&
+              !e.shiftKey
+            ) {
+
+              e.preventDefault();
+
+              sendMessage();
+
+            }
+
+          }
+
+
+          loadConfig();
+
+
+          </script>
+
+
+          </body>
+
+          </html>
+          '''
+
+
+          # =====================================================
+          # CONFIG
+          # =====================================================
+
+          def read_config():
+
+              if not os.path.exists(
+                  CONFIG_FILE
+              ):
+                  return {}
+
+              try:
+
+                  with open(
+                      CONFIG_FILE,
+                      "r"
+                  ) as f:
+
+                      return json.load(f)
+
+              except Exception:
+
+                  return {}
+
+
+          def write_config(
+              data
+          ):
+
+              with open(
+                  CONFIG_FILE,
+                  "w"
+              ) as f:
+
+                  json.dump(
+                      data,
+                      f
+                  )
+
+
+          # =====================================================
+          # AI REQUEST
+          # =====================================================
+
+          def call_ai(
+              config,
+              messages
+          ):
+
+              endpoint =
+                  config.get(
+                      "endpoint",
+                      ""
+                  ).strip()
+
+
+              api_key =
+                  config.get(
+                      "apikey",
+                      ""
+                  ).strip()
+
+
+              model =
+                  config.get(
+                      "model",
+                      ""
+                  ).strip()
+
+
+              system =
+                  config.get(
+                      "system",
+                      "You are a helpful AI assistant."
+                  )
+
+
+              if not endpoint:
+
+                  raise Exception(
+                      "API Endpoint belum diset."
+                  )
+
+
+              if not model:
+
+                  raise Exception(
+                      "Model belum diset."
+                  )
+
+
+              final_messages = []
+
+
+              if system:
+
+                  final_messages.append({
+
+                      "role":
+                          "system",
+
+                      "content":
+                          system
+
+                  })
+
+
+              final_messages.extend(
+                  messages
+              )
+
+
+              payload = {
+
+                  "model":
+                      model,
+
+                  "messages":
+                      final_messages
+
+              }
+
+
+              body =
+                  json.dumps(
+                      payload
+                  ).encode()
+
+
+              headers = {
+
+                  "Content-Type":
+                      "application/json"
+
+              }
+
+
+              if api_key:
+
+                  headers[
+                      "Authorization"
+                  ] =
+                      "Bearer " + api_key
+
+
+              request =
+                  urllib.request.Request(
+
+                      endpoint,
+
+                      data=body,
+
+                      headers=headers,
+
+                      method="POST"
+
+                  )
+
+
+              try:
+
+                  with urllib.request.urlopen(
+                      request,
+                      timeout=120
+                  ) as response:
+
+                      raw =
+                          response.read().decode()
+
+                      status =
+                          response.status
+
+              except urllib.error.HTTPError as e:
+
+                  error_body =
+                      e.read().decode(
+                          errors="replace"
+                      )
+
+                  raise Exception(
+
+                      "HTTP " +
+                      str(e.code) +
+                      ": " +
+                      error_body[:1000]
+
+                  )
+
+              except Exception as e:
+
+                  raise Exception(
+                      "Gagal menghubungi API: " +
+                      str(e)
+                  )
+
+
+              try:
+
+                  data =
+                      json.loads(
+                          raw
+                      )
+
+              except Exception:
+
+                  raise Exception(
+                      "Response API bukan JSON: " +
+                      raw[:500]
+                  )
+
+
+              # OpenAI-compatible format
+
+              try:
+
+                  content =
+                      data[
+                          "choices"
+                      ][0][
+                          "message"
+                      ][
+                          "content"
+                      ]
+
+                  return (
+                      content,
+                      status
+                  )
+
+              except Exception:
+
+                  pass
+
+
+              # Alternative format
+
+              if "content" in data:
+
+                  return (
+                      data["content"],
+                      status
+                  )
+
+
+              if "response" in data:
+
+                  return (
+                      data["response"],
+                      status
+                  )
+
+
+              raise Exception(
+
+                  "Format response API tidak dikenali: " +
+
+                  json.dumps(
+                      data
+                  )[:1000]
+
+              )
+
+
+          # =====================================================
+          # HTTP SERVER
+          # =====================================================
+
+          class Handler(
+              BaseHTTPRequestHandler
+          ):
+
+
+              def send_json(
+                  self,
+                  obj,
+                  status=200
+              ):
+
+                  raw =
+                      json.dumps(
+                          obj
+                      ).encode()
+
+
+                  self.send_response(
+                      status
+                  )
+
+
+                  self.send_header(
+                      "Content-Type",
+                      "application/json"
+                  )
+
+
+                  self.send_header(
+                      "Content-Length",
+                      str(len(raw))
+                  )
+
+
+                  self.send_header(
+                      "Access-Control-Allow-Origin",
+                      "*"
+                  )
+
+
+                  self.end_headers()
+
+
+                  self.wfile.write(
+                      raw
+                  )
+
+
+              # -------------------------------------------------
+              # GET
+              # -------------------------------------------------
+
+              def do_GET(
+                  self
+              ):
+
+
+                  if self.path == "/":
+
+                      raw =
+                          HTML.encode()
+
+
+                      self.send_response(
+                          200
+                      )
+
+
+                      self.send_header(
+                          "Content-Type",
+                          "text/html; charset=utf-8"
+                      )
+
+
+                      self.send_header(
+                          "Content-Length",
+                          str(len(raw))
+                      )
+
+
+                      self.end_headers()
+
+
+                      self.wfile.write(
+                          raw
+                      )
+
+                      return
+
+
+                  if self.path == "/api/config":
+
+                      config =
+                          read_config()
+
+
+                      self.send_json({
+
+                          "endpoint":
+                              config.get(
+                                  "endpoint",
+                                  ""
+                              ),
+
+                          "apikey":
+                              config.get(
+                                  "apikey",
+                                  ""
+                              ),
+
+                          "model":
+                              config.get(
+                                  "model",
+                                  ""
+                              ),
+
+                          "system":
+                              config.get(
+                                  "system",
+                                  ""
+                              )
+
+                      })
+
+                      return
+
+
+                  self.send_json(
+                      {
+                          "error":
+                              "Not found"
+                      },
+                      404
+                  )
+
+
+              # -------------------------------------------------
+              # POST
+              # -------------------------------------------------
+
+              def do_POST(
+                  self
+              ):
+
+
+                  length =
+                      int(
+                          self.headers.get(
+                              "Content-Length",
+                              "0"
+                          )
+                      )
+
+
+                  body =
+                      self.rfile.read(
+                          length
+                      )
+
+
+                  try:
+
+                      data =
+                          json.loads(
+                              body
+                          )
+
+                  except Exception:
+
+                      self.send_json(
+                          {
+                              "error":
+                                  "Invalid JSON"
+                          },
+                          400
+                      )
+
+                      return
+
+
+                  # -----------------------------------------------
+                  # SAVE CONFIG
+                  # -----------------------------------------------
+
+                  if self.path == "/api/config":
+
+                      write_config({
+
+                          "endpoint":
+                              data.get(
+                                  "endpoint",
+                                  ""
+                              ).strip(),
+
+                          "apikey":
+                              data.get(
+                                  "apikey",
+                                  ""
+                              ).strip(),
+
+                          "model":
+                              data.get(
+                                  "model",
+                                  ""
+                              ).strip(),
+
+                          "system":
+                              data.get(
+                                  "system",
+                                  ""
+                              ).strip()
+
+                      })
+
+
+                      self.send_json({
+                          "ok":
+                              True
+                      })
+
+
+                      return
+
+
+                  # -----------------------------------------------
+                  # TEST CONNECTION
+                  # -----------------------------------------------
+
+                  if self.path == \
+                      "/api/test-connection":
+
+                      endpoint =
+                          data.get(
+                              "endpoint",
+                              ""
+                          ).strip()
+
+
+                      if not endpoint:
+
+                          self.send_json({
+
+                              "ok":
+                                  False,
+
+                              "error":
+                                  "Endpoint kosong."
+
+                          }, 400)
+
+                          return
+
+
+                      try:
+
+                          request =
+                              urllib.request.Request(
+                                  endpoint,
+                                  method="GET"
+                              )
+
+
+                          with urllib.request.urlopen(
+                              request,
+                              timeout=15
+                          ) as response:
+
+                              status =
+                                  response.status
+
+
+                          self.send_json({
+
+                              "ok":
+                                  True,
+
+                              "status":
+                                  status
+
+                          })
+
+
+                      except urllib.error.HTTPError as e:
+
+                          # HTTP response proves
+                          # endpoint is reachable
+
+                          self.send_json({
+
+                              "ok":
+                                  True,
+
+                              "status":
+                                  e.code,
+
+                              "note":
+                                  "Endpoint reachable, " +
+                                  "but GET returned HTTP " +
+                                  str(e.code)
+
+                          })
+
+
+                      except Exception as e:
+
+                          self.send_json({
+
+                              "ok":
+                                  False,
+
+                              "error":
+                                  str(e)
+
+                          }, 500)
+
+
+                      return
+
+
+                  # -----------------------------------------------
+                  # TEST AI
+                  # -----------------------------------------------
+
+                  if self.path == "/api/test-ai":
+
+                      config = {
+
+                          "endpoint":
+                              data.get(
+                                  "endpoint",
+                                  ""
+                              ).strip(),
+
+                          "apikey":
+                              data.get(
+                                  "apikey",
+                                  ""
+                              ).strip(),
+
+                          "model":
+                              data.get(
+                                  "model",
+                                  ""
+                              ).strip(),
+
+                          "system":
+                              data.get(
+                                  "system",
+                                  ""
+                              ).strip()
+
+                      }
+
+
+                      try:
+
+                          content, status =
+                              call_ai(
+
+                                  config,
+
+                                  [{
+
+                                      "role":
+                                          "user",
+
+                                      "content":
+                                          "Reply with exactly: AI OK"
+
+                                  }]
+
+                              )
+
+
+                          self.send_json({
+
+                              "ok":
+                                  True,
+
+                              "status":
+                                  status,
+
+                              "content":
+                                  content
+
+                          })
+
+
+                      except Exception as e:
+
+                          self.send_json({
+
+                              "ok":
+                                  False,
+
+                              "error":
+                                  str(e)
+
+                          }, 500)
+
+
+                      return
+
+
+                  # -----------------------------------------------
+                  # CHAT
+                  # -----------------------------------------------
+
+                  if self.path == "/api/chat":
+
+                      config =
+                          read_config()
+
+
+                      messages =
+                          data.get(
+                              "messages",
+                              []
+                          )
+
+
+                      try:
+
+                          content, status =
+                              call_ai(
+
+                                  config,
+
+                                  messages
+
+                              )
+
+
+                          self.send_json({
+
+                              "content":
+                                  content,
+
+                              "status":
+                                  status
+
+                          })
+
+
+                      except Exception as e:
+
+                          self.send_json({
+
+                              "error":
+                                  str(e)
+
+                          }, 500)
+
+
+                      return
+
+
+                  self.send_json({
+
+                      "error":
+                          "Not found"
+
+                  }, 404)
+
+
+              def log_message(
+                  self,
+                  format,
+                  *args
+              ):
+
+                  print(
+                      "[WEB]",
+                      format % args
+                  )
+
+
+          # =====================================================
+          # START
+          # =====================================================
+
+          print(
+              "AI Agent listening on port",
+              PORT
+          )
+
+
+          server =
+              ThreadingHTTPServer(
+                  (
+                      "0.0.0.0",
+                      PORT
+                  ),
+                  Handler
+              )
+
+
+          server.serve_forever()
+
+          PY
+
+
+      # =========================================================
+      # START WEB SERVER
+      # =========================================================
+
+      - name: Start AI Agent
+        working-directory: app
+        run: |
+
+          nohup python3 server.py \
+            > server.log 2>&1 &
+
+          echo $! > server.pid
+
+          sleep 3
+
+          echo ""
+          echo "=============================="
+          echo "AI AGENT SERVER"
+          echo "=============================="
+
+          cat server.log || true
+
+          echo ""
+          echo "Testing local server..."
+
+          curl -I \
+            http://127.0.0.1:8080/ \
+            || true
+
+
+      # =========================================================
+      # CLOUDFLARE
+      # =========================================================
+
+      - name: Start Cloudflare Tunnel
+        run: |
+
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:8080 \
+            --no-autoupdate \
+            > cloudflare.log 2>&1 &
+
+          echo $! > cloudflare.pid
+
+
+          echo ""
+          echo "Waiting for Cloudflare..."
+          echo ""
+
+
+          for i in {1..30}; do
+
+            sleep 2
+
+
+            URL=$(
+              grep -oE \
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              cloudflare.log |
+              head -1 ||
+              true
+            )
+
+
+            if [ -n "$URL" ]; then
+
+              echo ""
+              echo "=========================================="
+              echo "          AI AGENT PUBLIC URL"
+              echo "=========================================="
+              echo ""
+              echo "$URL"
+              echo ""
+              echo "=========================================="
+              echo ""
+              echo "Open URL tersebut di browser."
+              echo ""
+              echo "Setup:"
+              echo "1. API Endpoint"
+              echo "2. API Key"
+              echo "3. Model"
+              echo "4. System Prompt"
+              echo ""
+              echo "Kemudian:"
+              echo "🔌 Test Connection"
+              echo "🧪 Test AI"
+              echo ""
+              echo "=========================================="
+
+              break
+
+            fi
+
+          done
+
+
+          echo ""
+          echo "===== CLOUDFLARE LOG ====="
+          cat cloudflare.log
+
+
+      # =========================================================
+      # KEEP ALIVE
+      # =========================================================
+
+      - name: Keep service alive
+        run: |
+
+          echo ""
+          echo "=========================================="
+          echo "        AI AGENT IS RUNNING"
+          echo "=========================================="
+          echo ""
+          echo "Cloudflare URL tersedia di log di atas."
+          echo ""
+          echo "Jangan hentikan workflow."
+          echo ""
+
+          tail -f /dev/null
