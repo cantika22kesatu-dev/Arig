@@ -1,0 +1,682 @@
+name: AI Agent Web App + Cloudflare
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ai-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Prepare AI Agent Web App
+        shell: bash
+        run: |
+          mkdir -p "$HOME/ai-agent"
+          cd "$HOME/ai-agent"
+
+          cat > app.py <<'PY'
+          import json
+          import os
+          import secrets
+          import urllib.request
+          import urllib.error
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          HOST = "0.0.0.0"
+          PORT = int(os.environ.get("PORT", "3000"))
+          CONFIG_FILE = "config.json"
+
+          ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
+
+          def load_config():
+              try:
+                  with open(CONFIG_FILE, "r") as f:
+                      return json.load(f)
+              except:
+                  return {
+                      "endpoint": "",
+                      "api_key": "",
+                      "model": "",
+                      "system_prompt": "You are a helpful AI assistant."
+                  }
+
+          def save_config(data):
+              with open(CONFIG_FILE, "w") as f:
+                  json.dump(data, f)
+
+          HTML = r'''
+          <!doctype html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>AI Agent</title>
+            <style>
+              *{box-sizing:border-box}
+              body{
+                margin:0;
+                font-family:Inter,Arial,sans-serif;
+                background:#0b1020;
+                color:#fff;
+              }
+              .wrap{
+                max-width:1000px;
+                margin:auto;
+                padding:20px;
+              }
+              .header{
+                display:flex;
+                justify-content:space-between;
+                align-items:center;
+                margin-bottom:20px;
+              }
+              .brand{
+                font-size:24px;
+                font-weight:800;
+              }
+              .tabs button{
+                background:#18213b;
+                color:white;
+                border:0;
+                padding:10px 15px;
+                border-radius:10px;
+                margin-left:5px;
+                cursor:pointer;
+              }
+              .card{
+                background:#11182b;
+                border:1px solid #26304b;
+                border-radius:18px;
+                padding:20px;
+              }
+              input,textarea{
+                width:100%;
+                background:#0a0f1d;
+                color:white;
+                border:1px solid #303b5d;
+                border-radius:10px;
+                padding:12px;
+                margin-top:7px;
+                margin-bottom:15px;
+                outline:none;
+              }
+              textarea{min-height:100px;resize:vertical}
+              label{
+                font-size:13px;
+                color:#aab4ce;
+              }
+              .primary{
+                width:100%;
+                border:0;
+                border-radius:11px;
+                padding:13px;
+                background:#5865f2;
+                color:white;
+                font-weight:700;
+                cursor:pointer;
+              }
+              #chat{
+                height:58vh;
+                overflow:auto;
+                padding:5px;
+                margin-bottom:12px;
+              }
+              .msg{
+                max-width:85%;
+                padding:12px 15px;
+                border-radius:15px;
+                margin:9px 0;
+                white-space:pre-wrap;
+                line-height:1.5;
+              }
+              .user{
+                margin-left:auto;
+                background:#5865f2;
+              }
+              .ai{
+                background:#1b2540;
+              }
+              .row{
+                display:flex;
+                gap:8px;
+              }
+              .row textarea{
+                margin:0;
+              }
+              .send{
+                width:100px;
+                border:0;
+                border-radius:11px;
+                background:#5865f2;
+                color:white;
+                font-weight:700;
+              }
+              .hidden{display:none}
+              .status{
+                font-size:13px;
+                color:#9ca9c7;
+                margin-top:10px;
+              }
+              .danger{
+                color:#ff9a9a;
+              }
+            </style>
+          </head>
+
+          <body>
+            <div class="wrap">
+
+              <div class="header">
+                <div class="brand">🤖 AI Agent</div>
+                <div class="tabs">
+                  <button onclick="show('chatPage')">Chat</button>
+                  <button onclick="show('setupPage')">Setup</button>
+                </div>
+              </div>
+
+              <div id="chatPage" class="card">
+                <div id="chat"></div>
+
+                <div class="row">
+                  <textarea id="message"
+                    placeholder="Tulis pertanyaan untuk AI Agent..."
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+                  <button class="send" onclick="send()">Kirim</button>
+                </div>
+
+                <div id="chatStatus" class="status"></div>
+              </div>
+
+              <div id="setupPage" class="card hidden">
+                <h2>⚙️ Setup AI Agent</h2>
+
+                <label>OpenAI-compatible Endpoint</label>
+                <input id="endpoint"
+                  placeholder="https://api.example.com/v1/chat/completions">
+
+                <label>API Key</label>
+                <input id="apikey"
+                  type="password"
+                  placeholder="sk-...">
+
+                <label>Model</label>
+                <input id="model"
+                  placeholder="deepseek-chat">
+
+                <label>System Prompt</label>
+                <textarea id="system"
+                  placeholder="You are a helpful AI assistant."></textarea>
+
+                <button class="primary" onclick="save()">💾 Simpan Konfigurasi</button>
+
+                <div id="setupStatus" class="status"></div>
+
+                <p class="status danger">
+                  API key disimpan pada instance runner. Jangan gunakan endpoint ini
+                  untuk data rahasia jika URL publik tidak dilindungi.
+                </p>
+              </div>
+
+            </div>
+
+          <script>
+          let messages=[];
+
+          function show(id){
+            document.getElementById("chatPage").classList.add("hidden");
+            document.getElementById("setupPage").classList.add("hidden");
+            document.getElementById(id).classList.remove("hidden");
+          }
+
+          function add(role,text){
+            const box=document.getElementById("chat");
+            const div=document.createElement("div");
+            div.className="msg "+(role==="user"?"user":"ai");
+            div.textContent=text;
+            box.appendChild(div);
+            box.scrollTop=box.scrollHeight;
+          }
+
+          async function load(){
+            const r=await fetch("/api/config");
+            const c=await r.json();
+
+            document.getElementById("endpoint").value=c.endpoint||"";
+            document.getElementById("apikey").value=c.api_key||"";
+            document.getElementById("model").value=c.model||"";
+            document.getElementById("system").value=c.system_prompt||"";
+          }
+
+          async function save(){
+            const data={
+              endpoint:document.getElementById("endpoint").value.trim(),
+              api_key:document.getElementById("apikey").value.trim(),
+              model:document.getElementById("model").value.trim(),
+              system_prompt:document.getElementById("system").value
+            };
+
+            const r=await fetch("/api/config",{
+              method:"POST",
+              headers:{"Content-Type":"application/json"},
+              body:JSON.stringify(data)
+            });
+
+            const x=await r.json();
+
+            document.getElementById("setupStatus").textContent =
+              x.ok ? "✅ Konfigurasi berhasil disimpan." : "❌ "+x.error;
+          }
+
+          async function send(){
+            const input=document.getElementById("message");
+            const text=input.value.trim();
+
+            if(!text)return;
+
+            input.value="";
+            add("user",text);
+
+            messages.push({
+              role:"user",
+              content:text
+            });
+
+            document.getElementById("chatStatus").textContent="AI sedang berpikir...";
+
+            try{
+              const r=await fetch("/api/chat",{
+                method:"POST",
+                headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({messages:messages})
+              });
+
+              const data=await r.json();
+
+              if(!r.ok){
+                throw new Error(data.error||"Request gagal");
+              }
+
+              const answer=data.content||"Tidak ada respons.";
+
+              add("assistant",answer);
+
+              messages.push({
+                role:"assistant",
+                content:answer
+              });
+
+              document.getElementById("chatStatus").textContent="";
+            }catch(e){
+              add("assistant","❌ "+e.message);
+              document.getElementById("chatStatus").textContent="";
+            }
+          }
+
+          load();
+          </script>
+
+          </body>
+          </html>
+          '''
+
+          class Handler(BaseHTTPRequestHandler):
+
+              def send_json(self, obj, status=200):
+                  raw=json.dumps(obj).encode()
+
+                  self.send_response(status)
+                  self.send_header("Content-Type","application/json")
+                  self.send_header("Content-Length",str(len(raw)))
+                  self.end_headers()
+                  self.wfile.write(raw)
+
+              def authorized(self):
+                  if not ACCESS_TOKEN:
+                      return True
+
+                  auth=self.headers.get("Authorization","")
+
+                  if auth == "Bearer "+ACCESS_TOKEN:
+                      return True
+
+                  token=self.headers.get("X-Access-Token","")
+
+                  return token == ACCESS_TOKEN
+
+              def do_GET(self):
+
+                  if not self.authorized():
+                      self.send_json({"error":"Unauthorized"},401)
+                      return
+
+                  if self.path == "/health":
+                      self.send_json({"status":"ok"})
+                      return
+
+                  if self.path == "/api/config":
+                      self.send_json(load_config())
+                      return
+
+                  if self.path == "/":
+                      raw=HTML.encode()
+
+                      self.send_response(200)
+                      self.send_header("Content-Type","text/html; charset=utf-8")
+                      self.send_header("Content-Length",str(len(raw)))
+                      self.end_headers()
+                      self.wfile.write(raw)
+                      return
+
+                  self.send_error(404)
+
+              def do_POST(self):
+
+                  if not self.authorized():
+                      self.send_json({"error":"Unauthorized"},401)
+                      return
+
+                  length=int(self.headers.get("Content-Length","0"))
+
+                  try:
+                      data=json.loads(self.rfile.read(length))
+                  except:
+                      self.send_json({"error":"Invalid JSON"},400)
+                      return
+
+                  if self.path == "/api/config":
+
+                      endpoint=str(data.get("endpoint","")).strip()
+                      api_key=str(data.get("api_key","")).strip()
+                      model=str(data.get("model","")).strip()
+                      system_prompt=str(
+                          data.get(
+                              "system_prompt",
+                              "You are a helpful AI assistant."
+                          )
+                      )
+
+                      if not endpoint:
+                          self.send_json(
+                              {"error":"Endpoint belum diisi"},
+                              400
+                          )
+                          return
+
+                      if not endpoint.startswith(("http://","https://")):
+                          self.send_json(
+                              {"error":"Endpoint harus http:// atau https://"},
+                              400
+                          )
+                          return
+
+                      config={
+                          "endpoint":endpoint,
+                          "api_key":api_key,
+                          "model":model,
+                          "system_prompt":system_prompt
+                      }
+
+                      save_config(config)
+
+                      self.send_json({"ok":True})
+                      return
+
+                  if self.path == "/api/chat":
+
+                      config=load_config()
+
+                      endpoint=config.get("endpoint","")
+                      api_key=config.get("api_key","")
+                      model=config.get("model","")
+                      system_prompt=config.get(
+                          "system_prompt",
+                          "You are a helpful AI assistant."
+                      )
+
+                      if not endpoint:
+                          self.send_json(
+                              {"error":"AI endpoint belum dikonfigurasi."},
+                              400
+                          )
+                          return
+
+                      incoming=data.get("messages",[])
+
+                      payload_messages=[]
+
+                      if system_prompt:
+                          payload_messages.append({
+                              "role":"system",
+                              "content":system_prompt
+                          })
+
+                      payload_messages.extend(incoming)
+
+                      payload={
+                          "model":model,
+                          "messages":payload_messages
+                      }
+
+                      body=json.dumps(payload).encode()
+
+                      headers={
+                          "Content-Type":"application/json"
+                      }
+
+                      if api_key:
+                          headers["Authorization"]="Bearer "+api_key
+
+                      req=urllib.request.Request(
+                          endpoint,
+                          data=body,
+                          headers=headers,
+                          method="POST"
+                      )
+
+                      try:
+                          with urllib.request.urlopen(
+                              req,
+                              timeout=180
+                          ) as response:
+
+                              result=json.loads(
+                                  response.read().decode()
+                              )
+
+                          content=""
+
+                          try:
+                              content=result["choices"][0]["message"]["content"]
+                          except:
+                              try:
+                                  content=result["choices"][0]["text"]
+                              except:
+                                  content=json.dumps(result,indent=2)
+
+                          self.send_json({
+                              "content":content
+                          })
+
+                      except urllib.error.HTTPError as e:
+
+                          error=e.read().decode(
+                              errors="ignore"
+                          )
+
+                          self.send_json({
+                              "error":"AI API HTTP "+str(e.code)+": "+error[:3000]
+                          },502)
+
+                      except Exception as e:
+
+                          self.send_json({
+                              "error":"AI API error: "+str(e)
+                          },502)
+
+                      return
+
+                  self.send_json(
+                      {"error":"Not found"},
+                      404
+                  )
+
+              def log_message(self,format,*args):
+                  print(format%args)
+
+          print("")
+          print("======================================")
+          print("       AI AGENT WEB APP")
+          print("======================================")
+          print("Local server: http://0.0.0.0:"+str(PORT))
+          print("Access token: "+ACCESS_TOKEN)
+          print("======================================")
+          print("")
+
+          server=ThreadingHTTPServer((HOST,PORT),Handler)
+          server.serve_forever()
+          PY
+
+      - name: Create access token
+        shell: bash
+        run: |
+          TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
+          echo "ACCESS_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          echo "::add-mask::$TOKEN"
+
+          echo ""
+          echo "======================================"
+          echo "🔐 ACCESS TOKEN"
+          echo "======================================"
+          echo "$TOKEN"
+          echo "======================================"
+          echo ""
+
+      - name: Start AI Agent
+        shell: bash
+        run: |
+          cd "$HOME/ai-agent"
+
+          nohup env \
+            PORT=3000 \
+            ACCESS_TOKEN="$ACCESS_TOKEN" \
+            python3 app.py > agent.log 2>&1 &
+
+          echo $! > agent.pid
+
+          sleep 3
+
+          curl -fsS \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            http://127.0.0.1:3000/health
+
+          echo ""
+          echo "AI Agent berhasil dijalankan."
+
+      - name: Install Cloudflare Tunnel
+        shell: bash
+        run: |
+          curl -L \
+            --fail \
+            --retry 5 \
+            -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+          chmod +x cloudflared
+
+          sudo mv cloudflared /usr/local/bin/cloudflared
+
+          cloudflared --version
+
+      - name: Start Cloudflare Tunnel
+        shell: bash
+        run: |
+          nohup cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:3000 \
+            > "$HOME/ai-agent/cloudflare.log" 2>&1 &
+
+          echo $! > "$HOME/ai-agent/cloudflare.pid"
+
+          echo "Menunggu URL Cloudflare..."
+
+          for i in $(seq 1 30); do
+            URL=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              "$HOME/ai-agent/cloudflare.log" \
+              | head -n 1 || true)
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          echo ""
+          echo "=============================================="
+          echo "🚀 AI AGENT ONLINE"
+          echo "=============================================="
+          echo ""
+          echo "🌐 CLOUDFLARE URL:"
+          echo "$URL"
+          echo ""
+          echo "🔐 ACCESS TOKEN:"
+          echo "$ACCESS_TOKEN"
+          echo ""
+          echo "Buka URL tersebut di browser."
+          echo "Masuk ke Setup untuk memasukkan:"
+          echo "  - Endpoint"
+          echo "  - API Key"
+          echo "  - Model"
+          echo "  - System Prompt"
+          echo ""
+          echo "=============================================="
+
+          if [ -z "$URL" ]; then
+            echo ""
+            echo "Cloudflare gagal mendapatkan URL."
+            echo ""
+            cat "$HOME/ai-agent/cloudflare.log"
+            exit 1
+          fi
+
+          echo "CLOUDFLARE_URL=$URL" >> "$GITHUB_ENV"
+
+      - name: Keep AI Agent Online
+        shell: bash
+        run: |
+          echo ""
+          echo "=============================================="
+          echo "🤖 AI AGENT SIAP DIKONSULTASIKAN"
+          echo "=============================================="
+          echo ""
+          echo "URL:"
+          echo "$CLOUDFLARE_URL"
+          echo ""
+          echo "Access Token:"
+          echo "$ACCESS_TOKEN"
+          echo ""
+          echo "Workflow akan menjaga server tetap hidup."
+          echo "=============================================="
+
+          tail -f "$HOME/ai-agent/cloudflare.log" &
+          TAIL_PID=$!
+
+          trap 'kill $TAIL_PID 2>/dev/null || true' EXIT
+
+          while true; do
+            if ! kill -0 "$(cat "$HOME/ai-agent/agent.pid")" 2>/dev/null; then
+              echo "AI Agent berhenti."
+              exit 1
+            fi
+
+            if ! kill -0 "$(cat "$HOME/ai-agent/cloudflare.pid")" 2>/dev/null; then
+              echo "Cloudflare Tunnel berhenti."
+              exit 1
+            fi
+
+            sleep 30
+          done
