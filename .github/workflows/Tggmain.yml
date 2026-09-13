@@ -1,0 +1,134 @@
+name: n8n + Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  n8n:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Update system
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget jq
+
+      - name: Install Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install n8n
+        run: |
+          npm install -g n8n
+          n8n --version
+
+      - name: Install Cloudflared
+        run: |
+          wget -q \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+            -O cloudflared.deb
+
+          sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+
+          cloudflared --version
+
+      - name: Start n8n
+        env:
+          N8N_HOST: 0.0.0.0
+          N8N_PORT: 5678
+          N8N_PROTOCOL: http
+          N8N_SECURE_COOKIE: "false"
+          N8N_EDITOR_BASE_URL: http://localhost:5678
+          WEBHOOK_URL: http://localhost:5678/
+        run: |
+          mkdir -p "$HOME/.n8n"
+
+          nohup n8n start \
+            > "$HOME/n8n.log" 2>&1 &
+
+          echo $! > "$HOME/n8n.pid"
+
+          echo "Menunggu n8n..."
+
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:5678/healthz >/dev/null 2>&1; then
+              echo "n8n sudah berjalan."
+              break
+            fi
+
+            sleep 2
+          done
+
+          echo "=== n8n status ==="
+          curl -I http://127.0.0.1:5678/ || true
+
+      - name: Start Cloudflare Quick Tunnel
+        run: |
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:5678 \
+            --no-autoupdate \
+            > "$HOME/cloudflared.log" 2>&1 &
+
+          echo $! > "$HOME/cloudflared.pid"
+
+          echo "Menunggu URL Cloudflare..."
+
+          for i in {1..60}; do
+            URL=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              "$HOME/cloudflared.log" | head -n 1 || true)
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          echo ""
+          echo "========================================="
+          echo "          n8n CLOUDFLARE TUNNEL"
+          echo "========================================="
+          echo ""
+          echo "Public URL:"
+          echo "$URL"
+          echo ""
+          echo "Local n8n:"
+          echo "http://127.0.0.1:5678"
+          echo ""
+          echo "========================================="
+
+          echo "N8N_PUBLIC_URL=$URL" >> "$GITHUB_ENV"
+
+      - name: Keep n8n and tunnel alive
+        run: |
+          echo "n8n PID: $(cat "$HOME/n8n.pid" 2>/dev/null || echo unknown)"
+          echo "Cloudflare PID: $(cat "$HOME/cloudflared.pid" 2>/dev/null || echo unknown)"
+          echo ""
+
+          while true; do
+            echo "===== $(date) ====="
+
+            echo "--- n8n ---"
+            curl -fsS http://127.0.0.1:5678/healthz || true
+
+            echo ""
+            echo "--- Cloudflare URL ---"
+            grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              "$HOME/cloudflared.log" | head -n 1 || true
+
+            echo ""
+            echo "--- Processes ---"
+            ps aux | grep -E 'n8n|cloudflared' | grep -v grep || true
+
+            echo ""
+            echo "--- Cloudflare log ---"
+            tail -n 5 "$HOME/cloudflared.log" || true
+
+            echo ""
+            echo "--- n8n log ---"
+            tail -n 5 "$HOME/n8n.log" || true
+
+            sleep 30
+          done
