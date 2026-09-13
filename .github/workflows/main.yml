@@ -1,0 +1,1034 @@
+name: Hermes Web App
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hermes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl \
+            git \
+            python3 \
+            python3-pip \
+            python3-venv \
+            nodejs \
+            npm
+
+      # =========================
+      # INSTALL HERMES AGENT
+      # =========================
+      - name: Install Hermes
+        shell: bash
+        run: |
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.hermes/bin" >> "$GITHUB_PATH"
+
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+
+          echo "=== Hermes ==="
+          hermes --version || true
+
+      # =========================
+      # CREATE WEB APP
+      # =========================
+      - name: Create Hermes Web App
+        shell: bash
+        run: |
+          mkdir -p web
+          cd web
+
+          cat > requirements.txt <<'EOF'
+          fastapi
+          uvicorn[standard]
+          httpx
+          EOF
+
+          cat > main.py <<'PY'
+          import os
+          import httpx
+
+          from fastapi import FastAPI, Request
+          from fastapi.responses import HTMLResponse
+
+          app = FastAPI()
+
+          HERMES_API = os.getenv(
+              "HERMES_API",
+              "http://127.0.0.1:8642"
+          )
+
+          HTML = r"""
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport"
+                  content="width=device-width,initial-scale=1">
+
+            <title>Hermes Web</title>
+
+            <style>
+              * {
+                box-sizing:border-box;
+              }
+
+              body {
+                margin:0;
+                background:#09090b;
+                color:#f4f4f5;
+                font-family:
+                  Inter,
+                  system-ui,
+                  -apple-system,
+                  sans-serif;
+              }
+
+              .app {
+                display:flex;
+                min-height:100vh;
+              }
+
+              .sidebar {
+                width:240px;
+                background:#111113;
+                border-right:1px solid #27272a;
+                padding:18px;
+                position:fixed;
+                top:0;
+                bottom:0;
+                left:0;
+              }
+
+              .logo {
+                display:flex;
+                align-items:center;
+                gap:10px;
+                margin-bottom:30px;
+                font-weight:800;
+                font-size:19px;
+              }
+
+              .logo-icon {
+                width:36px;
+                height:36px;
+                border-radius:11px;
+                background:white;
+                color:#111;
+                display:grid;
+                place-items:center;
+              }
+
+              .nav {
+                width:100%;
+                border:0;
+                background:none;
+                color:#a1a1aa;
+                padding:11px;
+                border-radius:9px;
+                text-align:left;
+                cursor:pointer;
+                margin-bottom:3px;
+              }
+
+              .nav:hover,
+              .nav.active {
+                background:#27272a;
+                color:white;
+              }
+
+              .status {
+                position:absolute;
+                bottom:18px;
+                left:18px;
+                right:18px;
+                border:1px solid #27272a;
+                background:#18181b;
+                border-radius:10px;
+                padding:12px;
+                font-size:11px;
+              }
+
+              .dot {
+                display:inline-block;
+                width:7px;
+                height:7px;
+                border-radius:50%;
+                background:#71717a;
+                margin-right:6px;
+              }
+
+              .dot.online {
+                background:#4ade80;
+                box-shadow:0 0 10px #4ade80;
+              }
+
+              main {
+                margin-left:240px;
+                width:calc(100% - 240px);
+              }
+
+              header {
+                height:75px;
+                border-bottom:1px solid #27272a;
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+                padding:0 30px;
+              }
+
+              header small {
+                color:#71717a;
+                letter-spacing:.12em;
+                font-size:9px;
+              }
+
+              header h1 {
+                margin:3px 0 0;
+                font-size:19px;
+              }
+
+              .content {
+                max-width:1100px;
+                margin:auto;
+                padding:30px;
+              }
+
+              .hero {
+                border:1px solid #27272a;
+                background:
+                  radial-gradient(
+                    circle at 80% 0%,
+                    #27272a,
+                    #111113 45%
+                  );
+                border-radius:17px;
+                padding:30px;
+                margin-bottom:18px;
+              }
+
+              .hero h2 {
+                margin:5px 0 8px;
+                font-size:34px;
+                letter-spacing:-.04em;
+              }
+
+              .hero p {
+                color:#a1a1aa;
+                max-width:650px;
+                line-height:1.6;
+                font-size:13px;
+              }
+
+              .cards {
+                display:grid;
+                grid-template-columns:
+                  repeat(4,1fr);
+                gap:12px;
+                margin-bottom:18px;
+              }
+
+              .card {
+                background:#111113;
+                border:1px solid #27272a;
+                border-radius:13px;
+                padding:17px;
+              }
+
+              .card small {
+                color:#71717a;
+                font-size:9px;
+                display:block;
+              }
+
+              .card strong {
+                display:block;
+                margin-top:7px;
+                font-size:14px;
+              }
+
+              .panel {
+                background:#111113;
+                border:1px solid #27272a;
+                border-radius:15px;
+                overflow:hidden;
+              }
+
+              .panel-head {
+                padding:17px 18px;
+                border-bottom:1px solid #27272a;
+                font-weight:700;
+              }
+
+              #messages {
+                min-height:430px;
+                max-height:55vh;
+                overflow:auto;
+                padding:20px;
+              }
+
+              .message {
+                margin-bottom:14px;
+                display:flex;
+              }
+
+              .message.user {
+                justify-content:flex-end;
+              }
+
+              .bubble {
+                max-width:80%;
+                padding:11px 14px;
+                border-radius:12px;
+                font-size:12px;
+                line-height:1.6;
+                white-space:pre-wrap;
+              }
+
+              .assistant .bubble {
+                background:#202023;
+                border:1px solid #303035;
+              }
+
+              .user .bubble {
+                background:#f4f4f5;
+                color:#111;
+              }
+
+              .composer {
+                display:flex;
+                gap:8px;
+                padding:12px;
+                border-top:1px solid #27272a;
+              }
+
+              textarea {
+                flex:1;
+                resize:none;
+                min-height:48px;
+                max-height:150px;
+                background:#18181b;
+                color:white;
+                border:1px solid #303036;
+                border-radius:9px;
+                padding:12px;
+                outline:none;
+              }
+
+              button.send {
+                width:48px;
+                border:0;
+                border-radius:9px;
+                background:white;
+                color:#111;
+                cursor:pointer;
+                font-weight:800;
+              }
+
+              .page {
+                display:none;
+              }
+
+              .page.active {
+                display:block;
+              }
+
+              .info {
+                padding:25px;
+                color:#a1a1aa;
+                line-height:1.7;
+                font-size:13px;
+              }
+
+              @media(max-width:800px) {
+                .sidebar {
+                  transform:translateX(-100%);
+                  transition:.2s;
+                  z-index:5;
+                }
+
+                .sidebar.open {
+                  transform:translateX(0);
+                }
+
+                main {
+                  margin-left:0;
+                  width:100%;
+                }
+
+                .cards {
+                  grid-template-columns:repeat(2,1fr);
+                }
+
+                .content {
+                  padding:15px;
+                }
+
+                .hero h2 {
+                  font-size:27px;
+                }
+              }
+
+              @media(max-width:480px) {
+                .cards {
+                  grid-template-columns:1fr;
+                }
+
+                header {
+                  padding:0 15px;
+                }
+
+                .bubble {
+                  max-width:90%;
+                }
+              }
+            </style>
+          </head>
+
+          <body>
+
+          <div class="app">
+
+            <aside class="sidebar" id="sidebar">
+
+              <div class="logo">
+                <div class="logo-icon">✦</div>
+                Hermes
+              </div>
+
+              <button class="nav active"
+                      onclick="page('overview',this)">
+                ◈ &nbsp; Overview
+              </button>
+
+              <button class="nav"
+                      onclick="page('chat',this)">
+                ◉ &nbsp; Chat
+              </button>
+
+              <button class="nav"
+                      onclick="page('models',this)">
+                ◇ &nbsp; Models
+              </button>
+
+              <button class="nav"
+                      onclick="page('memory',this)">
+                ◌ &nbsp; Memory
+              </button>
+
+              <button class="nav"
+                      onclick="page('tools',this)">
+                ⚒ &nbsp; Tools
+              </button>
+
+              <button class="nav"
+                      onclick="page('sessions',this)">
+                ◎ &nbsp; Sessions
+              </button>
+
+              <button class="nav"
+                      onclick="page('setup',this)">
+                ⚙ &nbsp; Setup
+              </button>
+
+              <div class="status">
+                <span id="dot" class="dot"></span>
+                <span id="status">
+                  Checking Hermes...
+                </span>
+              </div>
+
+            </aside>
+
+            <main>
+
+              <header>
+                <div>
+                  <small>HERMES CONTROL</small>
+                  <h1 id="title">Overview</h1>
+                </div>
+              </header>
+
+              <div class="content">
+
+                <section id="overview"
+                         class="page active">
+
+                  <div class="hero">
+                    <small>CONTROL CENTER</small>
+
+                    <h2>
+                      Your agent, in one place.
+                    </h2>
+
+                    <p>
+                      Modern web interface for
+                      Hermes Agent. Chat, monitor
+                      and control your agent directly
+                      from your browser.
+                    </p>
+
+                    <button
+                      onclick="page('chat')"
+                      style="
+                        padding:11px 15px;
+                        border:0;
+                        border-radius:9px;
+                        cursor:pointer;
+                      ">
+                      Open Hermes Chat
+                    </button>
+                  </div>
+
+                  <div class="cards">
+
+                    <div class="card">
+                      <small>AGENT</small>
+                      <strong>Hermes Agent</strong>
+                    </div>
+
+                    <div class="card">
+                      <small>GATEWAY</small>
+                      <strong id="gateway">
+                        Checking...
+                      </strong>
+                    </div>
+
+                    <div class="card">
+                      <small>WEB APP</small>
+                      <strong>Online</strong>
+                    </div>
+
+                    <div class="card">
+                      <small>PLATFORM</small>
+                      <strong>GitHub Runner</strong>
+                    </div>
+
+                  </div>
+
+                </section>
+
+                <section id="chat"
+                         class="page">
+
+                  <div class="panel">
+
+                    <div class="panel-head">
+                      Hermes Chat
+                    </div>
+
+                    <div id="messages">
+
+                      <div class="message assistant">
+                        <div class="bubble">
+                          Hermes is ready.
+                          Send a message to start.
+                        </div>
+                      </div>
+
+                    </div>
+
+                    <div class="composer">
+
+                      <textarea
+                        id="input"
+                        placeholder="Ask Hermes anything..."
+                        onkeydown="
+                          if(event.key==='Enter'
+                          && !event.shiftKey){
+                            event.preventDefault();
+                            send();
+                          }
+                        ">
+                      </textarea>
+
+                      <button
+                        class="send"
+                        onclick="send()">
+                        ➤
+                      </button>
+
+                    </div>
+
+                  </div>
+
+                </section>
+
+                <section id="models"
+                         class="page">
+
+                  <div class="panel">
+                    <div class="panel-head">
+                      Models
+                    </div>
+
+                    <div class="info">
+                      Model routing is handled by
+                      Hermes Agent. Configure your
+                      provider through the Hermes
+                      configuration.
+                    </div>
+                  </div>
+
+                </section>
+
+                <section id="memory"
+                         class="page">
+
+                  <div class="panel">
+                    <div class="panel-head">
+                      Memory
+                    </div>
+
+                    <div class="info">
+                      Hermes workspace memory and
+                      context are managed by the
+                      Hermes Agent runtime.
+                    </div>
+                  </div>
+
+                </section>
+
+                <section id="tools"
+                         class="page">
+
+                  <div class="panel">
+                    <div class="panel-head">
+                      Tools
+                    </div>
+
+                    <div class="info">
+                      Your Hermes Agent can use the
+                      tools configured in its runtime.
+                    </div>
+                  </div>
+
+                </section>
+
+                <section id="sessions"
+                         class="page">
+
+                  <div class="panel">
+                    <div class="panel-head">
+                      Sessions
+                    </div>
+
+                    <div class="info">
+                      Session history is managed by
+                      Hermes Agent.
+                    </div>
+                  </div>
+
+                </section>
+
+                <section id="setup"
+                         class="page">
+
+                  <div class="panel">
+                    <div class="panel-head">
+                      Setup
+                    </div>
+
+                    <div class="info">
+                      Configure Hermes Agent,
+                      providers, models and API
+                      credentials on the runner.
+                    </div>
+                  </div>
+
+                </section>
+
+              </div>
+
+            </main>
+
+          </div>
+
+          <script>
+
+          function page(name,button){
+
+            document
+              .querySelectorAll('.page')
+              .forEach(x =>
+                x.classList.remove('active')
+              );
+
+            document
+              .getElementById(name)
+              .classList.add('active');
+
+            document
+              .querySelectorAll('.nav')
+              .forEach(x =>
+                x.classList.remove('active')
+              );
+
+            if(button)
+              button.classList.add('active');
+
+            const titles = {
+              overview:'Overview',
+              chat:'Chat',
+              models:'Models',
+              memory:'Memory',
+              tools:'Tools',
+              sessions:'Sessions',
+              setup:'Setup'
+            };
+
+            document.getElementById('title')
+              .innerText = titles[name];
+
+            document.getElementById('sidebar')
+              .classList.remove('open');
+          }
+
+          async function checkStatus(){
+
+            try {
+
+              const r =
+                await fetch('/api/status');
+
+              const d =
+                await r.json();
+
+              document.getElementById('status')
+                .innerText =
+                d.online ? 'Hermes Online'
+                         : 'Hermes Offline';
+
+              document.getElementById('gateway')
+                .innerText =
+                d.online ? 'Online'
+                         : 'Offline';
+
+              if(d.online)
+                document.getElementById('dot')
+                  .classList.add('online');
+
+            } catch(e){
+
+              document.getElementById('status')
+                .innerText =
+                'Web App Online';
+
+            }
+
+          }
+
+          async function send(){
+
+            const input =
+              document.getElementById('input');
+
+            const text =
+              input.value.trim();
+
+            if(!text) return;
+
+            addMessage('user',text);
+
+            input.value='';
+
+            addMessage(
+              'assistant',
+              'Hermes sedang berpikir...'
+            );
+
+            try {
+
+              const r =
+                await fetch('/api/chat',{
+                  method:'POST',
+                  headers:{
+                    'Content-Type':
+                      'application/json'
+                  },
+                  body:JSON.stringify({
+                    messages:[
+                      {
+                        role:'user',
+                        content:text
+                      }
+                    ]
+                  })
+                });
+
+              const d =
+                await r.json();
+
+              const result =
+                d?.choices?.[0]
+                 ?.message?.content
+                || d?.response
+                || d?.message
+                || d?.error
+                || 'Tidak ada respons.';
+
+              const boxes =
+                document.querySelectorAll(
+                  '.message.assistant .bubble'
+                );
+
+              if(boxes.length)
+                boxes[boxes.length-1]
+                  .innerText=result;
+
+            } catch(e){
+
+              const boxes =
+                document.querySelectorAll(
+                  '.message.assistant .bubble'
+                );
+
+              if(boxes.length)
+                boxes[boxes.length-1]
+                  .innerText=
+                  'Error: '+e.message;
+
+            }
+
+          }
+
+          function addMessage(role,text){
+
+            const wrap =
+              document.createElement('div');
+
+            wrap.className =
+              'message '+role;
+
+            wrap.innerHTML =
+              '<div class="bubble"></div>';
+
+            wrap.querySelector('.bubble')
+              .innerText=text;
+
+            document
+              .getElementById('messages')
+              .appendChild(wrap);
+
+            const box =
+              document.getElementById('messages');
+
+            box.scrollTop=box.scrollHeight;
+          }
+
+          checkStatus();
+
+          setInterval(checkStatus,10000);
+
+          </script>
+
+          </body>
+          </html>
+          """
+
+          @app.get("/", response_class=HTMLResponse)
+          async def home():
+              return HTML
+
+          @app.get("/api/status")
+          async def status():
+              try:
+                  async with httpx.AsyncClient(
+                      timeout=5
+                  ) as client:
+
+                      r = await client.get(
+                          f"{HERMES_API}/v1/models"
+                      )
+
+                      return {
+                          "online":
+                              r.status_code < 500
+                      }
+
+              except Exception:
+                  return {
+                      "online": False
+                  }
+
+          @app.post("/api/chat")
+          async def chat(request: Request):
+
+              data = await request.json()
+
+              try:
+
+                  async with httpx.AsyncClient(
+                      timeout=300
+                  ) as client:
+
+                      r = await client.post(
+                          f"{HERMES_API}/v1/chat/completions",
+                          json=data
+                      )
+
+                      return r.json()
+
+              except Exception as e:
+
+                  return {
+                      "error": str(e)
+                  }
+          PY
+
+          cd ..
+
+      # =========================
+      # PYTHON
+      # =========================
+      - name: Install Web App
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r web/requirements.txt
+
+      # =========================
+      # START HERMES
+      # =========================
+      - name: Start Hermes
+        shell: bash
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+
+          mkdir -p logs
+
+          nohup hermes gateway \
+            --host 127.0.0.1 \
+            --port 8642 \
+            > logs/hermes.log 2>&1 &
+
+          echo "Hermes gateway starting..."
+
+          sleep 8
+
+          echo "=== Hermes log ==="
+          tail -n 80 logs/hermes.log || true
+
+      # =========================
+      # START WEB
+      # =========================
+      - name: Start Web App
+        shell: bash
+        run: |
+          . .venv/bin/activate
+
+          nohup python -m uvicorn \
+            web.main:app \
+            --host 127.0.0.1 \
+            --port 8080 \
+            > logs/web.log 2>&1 &
+
+          sleep 5
+
+          curl -fsS \
+            http://127.0.0.1:8080/ \
+            >/dev/null
+
+          echo "Hermes Web App started."
+
+      # =========================
+      # CLOUDFLARE
+      # =========================
+      - name: Install Cloudflare Tunnel
+        run: |
+          curl -L --fail \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o cloudflared
+
+          chmod +x cloudflared
+
+          sudo mv cloudflared \
+            /usr/local/bin/cloudflared
+
+          cloudflared --version
+
+      - name: Create Public URL
+        shell: bash
+        run: |
+
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:8080 \
+            --no-autoupdate \
+            > cloudflare.log 2>&1 &
+
+          echo "Waiting for Cloudflare..."
+
+          for i in {1..30}; do
+
+            URL=$(
+              grep -oE \
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              cloudflare.log |
+              head -n 1 ||
+              true
+            )
+
+            if [ -n "$URL" ]; then
+
+              echo ""
+              echo "=========================================="
+              echo "       HERMES WEB APP IS ONLINE"
+              echo "=========================================="
+              echo ""
+              echo "PUBLIC URL:"
+              echo "$URL"
+              echo ""
+              echo "OPEN URL ABOVE IN YOUR BROWSER"
+              echo ""
+              echo "=========================================="
+
+              break
+            fi
+
+            sleep 2
+
+          done
+
+          if ! grep -q \
+            "trycloudflare.com" \
+            cloudflare.log; then
+
+            echo "Cloudflare failed:"
+            cat cloudflare.log
+
+            exit 1
+
+          fi
+
+      # =========================
+      # KEEP ALIVE
+      # =========================
+      - name: Keep Alive
+        shell: bash
+        run: |
+
+          echo ""
+          echo "Hermes Web App running..."
+          echo "Do not stop this workflow."
+          echo ""
+
+          while true; do
+
+            echo \
+              "[$(date '+%Y-%m-%d %H:%M:%S')] ONLINE"
+
+            sleep 60
+
+          done
